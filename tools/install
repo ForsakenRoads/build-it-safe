@@ -1,0 +1,617 @@
+#!/usr/bin/env python3
+"""build-it-safe installer.
+
+  install [--target DIR] [--dry-run] [--yes] [options]     add the kit to a repository
+  install uninstall [--target DIR] [--dry-run] [--yes]     remove exactly what it added
+
+It detects the AI agents and frameworks in use, prints its plan, and writes
+only what is missing. It never overwrites your text: rules go into marked
+blocks, settings files are merged key by key, and template files are created
+only when absent. Running it again changes nothing.
+
+Options:
+  --agents LIST      comma-separated agents to set up (claude,codex,cursor,copilot,gemini),
+                     instead of detecting them; "none" for none
+  --with-ci          add the GitHub Actions workflow and dependabot.yml even without .github/
+  --no-ci            never add CI files
+  --with-templates   also add SECURITY.md and docs/security/ (incident playbook,
+                     launch checklist, backup protocol)
+  --lock-bypass      add "disableBypassPermissionsMode": "disable" to .claude/settings.json
+  --no-git-hooks     do not install the git hooks
+"""
+
+import argparse
+import copy
+import json
+import os
+import re
+import shutil
+import sys
+
+sys.dont_write_bytecode = True  # keep the kit folder free of __pycache__
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import kitlib as K  # noqa: E402
+
+RT = K.RUNTIME
+
+
+class Plan:
+    def __init__(self, target):
+        self.target = target
+        self.ops = []
+        self.notes = []
+
+    def add(self, op):
+        self.ops.append(op)
+
+    def note(self, level, text):
+        self.notes.append((level, text))
+
+
+def rel(target, path):
+    return os.path.relpath(path, target).replace(os.sep, "/")
+
+
+def load_manifest(target):
+    """The record of what the kit added. On disk, files are a list of
+    {"path", "sha256"} objects: a "name": "hash" map trips gitleaks' generic
+    key rule when a file name contains words such as "secrets"."""
+    data, status = K.load_json(os.path.join(target, K.MANIFEST))
+    if not isinstance(data, dict):
+        data = {}
+    data.setdefault("version", K.KIT_VERSION)
+    for k in ("files", "blocks", "json", "symlinks", "gitconfig", "created"):
+        data.setdefault(k, {} if k in ("files", "json", "gitconfig") else [])
+    if isinstance(data["files"], list):
+        data["files"] = {e.get("path"): e.get("sha256") for e in data["files"] if isinstance(e, dict)}
+    if isinstance(data["json"], list):
+        data["json"] = {e["path"]: {k: v for k, v in e.items() if k != "path"} for e in data["json"]
+                        if isinstance(e, dict) and "path" in e}
+    return data
+
+
+def save_manifest(target, man):
+    out = dict(man)
+    out["files"] = [{"path": p, "sha256": h} for p, h in sorted(man["files"].items())]
+    out["json"] = [dict(rec, path=p) for p, rec in sorted(man["json"].items())]
+    K.write(os.path.join(target, K.MANIFEST), json.dumps(out, indent=2, sort_keys=True) + "\n")
+
+
+# --------------------------------------------------------------------------
+# Planning
+# --------------------------------------------------------------------------
+
+def plan_block(plan, path, block, style, position="end", header="", executable=False, why=""):
+    full = os.path.join(plan.target, path)
+    text = K.read(full)
+    if text is None and os.path.exists(full):
+        plan.note("!", "%s could not be read as text, so it was left alone." % path)
+        return
+    new = K.upsert_block(text if text is not None else header, block, style, position)
+    if text == new and (not executable or os.access(full, os.X_OK)):
+        return
+    if text is None:
+        verb = "create"
+    else:
+        found = K.find_block(text, style)
+        verb = "update" if found else "add-to"
+    plan.add({"op": "block", "path": path, "style": style, "new": new, "verb": verb,
+              "created": text is None, "executable": executable, "why": why})
+
+
+def plan_file(plan, man, path, content, why, managed=False, executable=False):
+    """managed: the kit owns the file and may update it if you have not changed it."""
+    full = os.path.join(plan.target, path)
+    cur = K.read(full)
+    if cur is None and not os.path.lexists(full):
+        plan.add({"op": "file", "path": path, "content": content, "verb": "create", "created": True,
+                  "executable": executable, "why": why, "managed": managed})
+        return
+    if cur == content:
+        if executable and not os.access(full, os.X_OK):
+            plan.add({"op": "file", "path": path, "content": content, "verb": "update", "created": False,
+                      "executable": True, "why": "make it executable", "managed": managed})
+        elif managed and man["files"].get(path) != K.sha256(content):
+            plan.add({"op": "adopt", "path": path, "content": content, "verb": "record", "why": why})
+        return
+    if managed and cur is not None and man["files"].get(path) == K.sha256(cur):
+        plan.add({"op": "file", "path": path, "content": content, "verb": "update", "created": False,
+                  "executable": executable, "why": why + " (new kit version)", "managed": True})
+        return
+    if managed:
+        plan.note("!", "%s exists and differs from the kit's version; it was left alone." % path)
+
+
+def plan_json(plan, path, merge, why, unmerge_key):
+    full = os.path.join(plan.target, path)
+    data, status = K.load_json(full)
+    if status == "invalid":
+        plan.note("!", "%s is not plain JSON (comments?), so the kit did not edit it. Add the entries from "
+                       "kit/agents/ by hand." % path)
+        return
+    base = data if isinstance(data, dict) else {}
+    new = copy.deepcopy(base)
+    added = merge(new)
+    if new == base and status == "ok":
+        return
+    plan.add({"op": "json", "path": path, "data": new, "added": added, "verb": "create" if status == "missing" else "merge",
+              "created": status == "missing", "why": why, "key": unmerge_key})
+
+
+def has_guard(entries):
+    return any(K.GUARD_REF in json.dumps(e) for e in entries or [])
+
+
+def merge_claude(fragment, lock_bypass):
+    def merge(data):
+        added = {"deny": [], "hook": False, "disableBypass": False}
+        perms = data.get("permissions") if isinstance(data.get("permissions"), dict) else None
+        deny_needed = [r for r in fragment["permissions"]["deny"]
+                       if not perms or r not in (perms.get("deny") or [])]
+        if deny_needed:
+            perms = data.setdefault("permissions", {})
+            deny = perms.setdefault("deny", [])
+            for r in deny_needed:
+                deny.append(r)
+                added["deny"].append(r)
+        if lock_bypass:
+            perms = data.setdefault("permissions", {})
+            if "disableBypassPermissionsMode" not in perms:
+                perms["disableBypassPermissionsMode"] = "disable"
+                added["disableBypass"] = True
+        hooks = data.get("hooks") if isinstance(data.get("hooks"), dict) else {}
+        if not has_guard(hooks.get("PreToolUse")):
+            data.setdefault("hooks", {}).setdefault("PreToolUse", []).extend(copy.deepcopy(fragment["hooks"]["PreToolUse"]))
+            added["hook"] = True
+        return added
+    return merge
+
+
+def merge_event_hooks(fragment, version=None):
+    def merge(data):
+        added = {"events": []}
+        if version is not None and "version" not in data:
+            data["version"] = version
+            added["version"] = True
+        for event, entries in fragment["hooks"].items():
+            cur = (data.get("hooks") or {}).get(event)
+            if not has_guard(cur):
+                data.setdefault("hooks", {}).setdefault(event, []).extend(copy.deepcopy(entries))
+                added["events"].append(event)
+        return added
+    return merge
+
+
+def dependabot_yaml(ecosystems):
+    lines = ["# Dependabot: alerts and update pull requests for dependencies (added by the Build It Safe Kit).",
+             "# New versions wait a few days (cooldown) before Dependabot proposes them;",
+             "# security updates are not delayed.",
+             "version: 2", "updates:"]
+    for eco in ["github-actions"] + sorted(ecosystems):
+        lines += ['  - package-ecosystem: "%s"' % eco, '    directory: "/"',
+                  "    schedule:", '      interval: "weekly"']
+        if eco != "github-actions":
+            lines += ["    cooldown:", "      default-days: 3"]
+    return "\n".join(lines) + "\n"
+
+
+def gitignore_block(det):
+    lines = (K.read(K.kit_path("kit", "templates", "gitignore-lines")) or "").strip("\n")
+    return K.wrap_block(lines, "sh")
+
+
+def build_plan(target, args):
+    det = K.detect(target, args.agents)
+    plan = Plan(target)
+    plan.det = det
+    man = load_manifest(target)
+    agents = det["agents"]
+
+    # 1. The core block: AGENTS.md for every agent, CLAUDE.md / GEMINI.md where needed.
+    block = K.core_block()
+    plan_block(plan, "AGENTS.md", block, "md",
+               header="# AGENTS.md\n\nInstructions for AI coding agents working in this repository.\n",
+               why="the security rules every agent reads")
+    if "claude" in agents:
+        imp = K.wrap_block("@AGENTS.md", "md")
+        for cpath in ("CLAUDE.md", ".claude/CLAUDE.md"):
+            ctext = K.read(os.path.join(target, cpath))
+            if ctext is None:
+                continue
+            found = K.find_block(ctext, "md")
+            if found and ctext[found[0]:found[1]].strip() == imp.strip():
+                pass  # the kit's own import of AGENTS.md: already right
+            elif not found and re.search(r"(^|\s)@AGENTS\.md\b", ctext):
+                plan.note("i", "%s already imports AGENTS.md, so Claude Code reads the rules from there." % cpath)
+            else:
+                plan_block(plan, cpath, block, "md", why="security rules for Claude Code")
+            break
+        else:
+            plan_block(plan, "CLAUDE.md", imp, "md", why="imports AGENTS.md for Claude Code")
+    if "gemini" in agents:
+        plan_block(plan, "GEMINI.md", block, "md", why="security rules for Gemini CLI")
+    if "copilot" in agents and os.path.exists(os.path.join(target, ".github", "copilot-instructions.md")):
+        plan_block(plan, ".github/copilot-instructions.md", block, "md", why="security rules for Copilot")
+
+    # 2. The skill, in the shared Agent Skills location and Claude Code's.
+    src = K.kit_path("kit", "skills", "secure-build")
+    for dirpath, _, files in os.walk(src):
+        for f in sorted(files):
+            p = os.path.join(dirpath, f)
+            r = os.path.relpath(p, src).replace(os.sep, "/")
+            plan_file(plan, man, ".agents/skills/secure-build/" + r, K.read(p), "the secure-build skill", managed=True)
+            if plan.ops and plan.ops[-1].get("path") == ".agents/skills/secure-build/" + r:
+                plan.ops[-1]["group"] = ".agents/skills/secure-build/"
+    if "claude" in agents:
+        link = os.path.join(target, ".claude", "skills", "secure-build")
+        want = "../../.agents/skills/secure-build"
+        if os.path.islink(link):
+            if os.readlink(link) != want:
+                plan.note("!", ".claude/skills/secure-build is a link somewhere else; it was left alone.")
+        elif os.path.exists(link):
+            if not os.path.exists(os.path.join(link, "SKILL.md")) or "build-it-safe" not in (K.read(os.path.join(link, "SKILL.md")) or ""):
+                plan.note("!", ".claude/skills/secure-build already exists and is not the kit's; it was left alone.")
+        elif os.name == "nt":
+            for dirpath, _, files in os.walk(src):
+                for f in sorted(files):
+                    p = os.path.join(dirpath, f)
+                    r = os.path.relpath(p, src).replace(os.sep, "/")
+                    plan_file(plan, man, ".claude/skills/secure-build/" + r, K.read(p), "the skill for Claude Code", managed=True)
+        else:
+            plan.add({"op": "symlink", "path": ".claude/skills/secure-build", "to": want, "verb": "link",
+                      "why": "lets Claude Code load the same skill"})
+
+    # 3. The runtime folder: guard, hidden-text check, git hooks, settings.
+    plan_file(plan, man, RT + "/guard.py", K.read(K.kit_path("kit", "guard", "guard.py")), "the agent guard hook", True, True)
+    plan_file(plan, man, RT + "/hidden_text.py", K.read(K.kit_path("kit", "checks", "hidden_text.py")), "the hidden-character check", True, True)
+    plan_file(plan, man, RT + "/git-hooks/pre-commit", K.read(K.kit_path("kit", "git-hooks", "pre-commit")), "gitleaks before each commit", True, True)
+    plan_file(plan, man, RT + "/git-hooks/pre-push", K.read(K.kit_path("kit", "git-hooks", "pre-push")), "gitleaks before each push", True, True)
+    plan_file(plan, man, RT + "/README.md", K.read(K.kit_path("kit", "runtime", "README.md")), "what this folder is", True)
+    if not os.path.exists(os.path.join(target, RT, "config.json")):
+        plan_file(plan, man, RT + "/config.json", K.read(K.kit_path("kit", "agents", "config.json")), "settings a human may change")
+
+    # 4. Agent guardrails as code.
+    if "claude" in agents:
+        frag = json.loads(K.read(K.kit_path("kit", "agents", "claude-settings.json")))
+        plan_json(plan, ".claude/settings.json", merge_claude(frag, args.lock_bypass),
+                  "Claude Code: guard hook + deny rules", "claude")
+    if "cursor" in agents:
+        frag = json.loads(K.read(K.kit_path("kit", "agents", "cursor-hooks.json")))
+        plan_json(plan, ".cursor/hooks.json", merge_event_hooks(frag, version=1), "Cursor: guard hooks", "events")
+    if "codex" in agents:
+        frag = json.loads(K.read(K.kit_path("kit", "agents", "codex-hooks.json")))
+        plan_json(plan, ".codex/hooks.json", merge_event_hooks(frag), "Codex: guard hook", "events")
+        plan.note("i", "Codex runs project hooks only after you trust them: open Codex here and approve the hook in /hooks.")
+    if "copilot" in agents:
+        plan_file(plan, man, ".github/hooks/build-it-safe.json", K.read(K.kit_path("kit", "agents", "copilot-hooks.json")),
+                  "GitHub Copilot (CLI and cloud agent): guard hook", managed=True)
+    if "gemini" in agents:
+        frag = json.loads(K.read(K.kit_path("kit", "agents", "gemini-settings.json")))
+        plan_json(plan, ".gemini/settings.json", merge_event_hooks(frag), "Gemini CLI: guard hook", "events")
+
+    # 5. Repository hygiene.
+    plan_block(plan, ".gitignore", gitignore_block(det), "sh", why="keep .env files and keys out of git")
+    plan_file(plan, man, ".env.example", K.read(K.kit_path("kit", "templates", "env.example")), "names of the variables, never values")
+    plan_file(plan, man, ".gitleaks.toml", K.read(K.kit_path("kit", "templates", "gitleaks.toml")), "gitleaks settings")
+
+    # 6. Git hooks.
+    if not args.no_git_hooks:
+        place = K.hooks_placement(target)
+        plan.hooks = place
+        if place["mode"] == "none":
+            plan.note("!", "This folder is not a git repository, so the commit and push checks were skipped. Run `git init`, then install again.")
+        elif place["mode"] == "precommit":
+            plan.note("i", "This repository uses the pre-commit framework. Add the kit's entries from "
+                           "kit/pre-commit/pre-commit-config.yaml to your .pre-commit-config.yaml (the kit does not edit YAML).")
+        elif place["mode"] == "kitdir-set":
+            cur = K.git_out(target, "config", "--local", "--get", "core.hooksPath")
+            if cur != RT + "/git-hooks":
+                plan.add({"op": "gitconfig", "key": "core.hooksPath", "value": RT + "/git-hooks", "verb": "set",
+                          "path": ".git/config",
+                          "why": "your %s core.hooksPath points outside this repository; the kit's hooks run first, then yours" % place.get("scope", "global")})
+        elif place["mode"] == "blocks":
+            for name in ("pre-commit", "pre-push"):
+                p = rel(target, os.path.join(place["dir"], name))
+                plan_block(plan, p, K.hook_block(name), "sh", position="after-shebang", header="#!/bin/sh\n",
+                           executable=True, why="run the kit's %s check" % name)
+
+    # 7. CI.
+    want_ci = (det["github"] or args.with_ci) and not args.no_ci
+    if want_ci:
+        plan_file(plan, man, ".github/workflows/build-it-safe.yml", K.read(K.kit_path("kit", "ci", "build-it-safe.yml")),
+                  "CI: gitleaks, hidden characters, dependency review", managed=True)
+        plan_file(plan, man, ".github/dependabot.yml", dependabot_yaml(det["ecosystems"]), "Dependabot updates")
+    elif not args.no_ci:
+        plan.note("i", "No GitHub folder or remote found, so CI was skipped. Use --with-ci to add it anyway.")
+
+    # 8. Templates for humans.
+    if args.with_templates:
+        plan_file(plan, man, "SECURITY.md", K.read(K.kit_path("kit", "templates", "SECURITY.md")), "how to report a vulnerability")
+        for name in ("INCIDENT-PLAYBOOK.md", "LAUNCH-CHECKLIST.md", "BACKUP-PROTOCOL.md"):
+            plan_file(plan, man, "docs/security/" + name, K.read(K.kit_path("kit", "templates", name)), "a checklist for you")
+
+    # Notes that need a human.
+    if det["git"]:
+        for f, why in K.tracked_secret_files(target):
+            plan.note("✗", "%s is tracked by git, and it is %s. Run `git rm --cached %s`, commit, and rotate any keys it holds." % (f, why, f))
+    gl = K.load_guard().find_gitleaks()
+    if not gl:
+        plan.note("!", "gitleaks is not installed. The hooks fall back to basic patterns until you install it: "
+                       "https://github.com/gitleaks/gitleaks#installing")
+    if "claude" in agents and not args.lock_bypass:
+        plan.note("i", "Optional: to stop anyone (or any malware) starting Claude Code with --dangerously-skip-permissions, "
+                       "add \"permissions\": {\"disableBypassPermissionsMode\": \"disable\"} to ~/.claude/settings.json. "
+                       "The kit never edits your home folder.")
+    return plan
+
+
+# --------------------------------------------------------------------------
+# Printing and applying
+# --------------------------------------------------------------------------
+
+VERB_LABEL = {"create": "create", "update": "update", "add-to": "add to", "merge": "merge into", "link": "link",
+              "set": "set", "record": "record", "remove": "remove", "remove-from": "remove from", "unset": "unset",
+              "delete": "delete"}
+
+
+def print_plan(plan, paint, title):
+    det = getattr(plan, "det", None)
+    print(paint.bold(title) + "  " + paint.dim(plan.target))
+    if det is not None:
+        ag = ", ".join(K.AGENT_NAMES[a] for a in sorted(det["agents"])) or "none detected"
+        fw = ", ".join(sorted(det["frameworks"])) or "none detected"
+        print("  agents:     " + ag)
+        print("  frameworks: " + fw)
+        hp = getattr(plan, "hooks", None)
+        if hp:
+            print("  git hooks:  " + hp["why"])
+    print()
+    visible = [o for o in plan.ops if o["op"] != "adopt"]
+    if not visible:
+        print(paint.green("Nothing to do: everything the kit adds is already in place."))
+    else:
+        print(paint.bold("Plan:"))
+        shown, groups = [], {}
+        for o in visible:
+            g = o.get("group")
+            if g:
+                key = (g, o["verb"])
+                if key in groups:
+                    groups[key]["count"] += 1
+                    continue
+                o = dict(o, path=g, count=1)
+                groups[key] = o
+            shown.append(o)
+        col = min(max(len(o.get("path") or o.get("key") or "") for o in shown) + 2, 44)
+        for o in shown:
+            if o.get("count", 1) > 1:
+                o["why"] = "%s (%d files)" % (o.get("why", ""), o["count"])
+            sign = paint.green("+") if o["verb"] in ("create", "link", "set") else (
+                paint.red("-") if o["verb"] in ("remove", "delete", "unset", "remove-from") else paint.yellow("~"))
+            label = VERB_LABEL.get(o["verb"], o["verb"])
+            target = o.get("path") or o.get("key")
+            lead = 2 + 1 + 1 + 10 + 1 + col + 1
+            why = K.wrap(o.get("why", ""), indent=lead, lead=lead)
+            print("  %s %-10s %s %s" % (sign, label, target.ljust(col), paint.dim(why)))
+    if plan.notes:
+        print()
+        for level, text in plan.notes:
+            mark = {"✗": paint.red("✗"), "!": paint.yellow("!"), "i": paint.cyan("i")}.get(level, level)
+            print("  %s %s" % (mark, K.wrap(text, 4)))
+
+
+def apply_plan(plan, man):
+    t = plan.target
+    for o in plan.ops:
+        full = os.path.join(t, o.get("path", ""))
+        if o["op"] == "block":
+            K.write(full, o["new"], executable=o.get("executable"))
+            if o["path"] not in man["blocks"]:
+                man["blocks"].append(o["path"])
+            if o["created"] and o["path"] not in man["created"]:
+                man["created"].append(o["path"])
+        elif o["op"] == "file":
+            K.write(full, o["content"], executable=o.get("executable"))
+            man["files"][o["path"]] = K.sha256(o["content"])
+            if o["created"] and o["path"] not in man["created"]:
+                man["created"].append(o["path"])
+        elif o["op"] == "adopt":
+            man["files"][o["path"]] = K.sha256(o["content"])
+        elif o["op"] == "symlink":
+            os.makedirs(os.path.dirname(full), exist_ok=True)
+            os.symlink(o["to"], full)
+            if o["path"] not in man["symlinks"]:
+                man["symlinks"].append(o["path"])
+        elif o["op"] == "json":
+            K.write(full, json.dumps(o["data"], indent=2) + "\n")
+            rec = man["json"].setdefault(o["path"], {"created": o["created"]})
+            for k, v in o["added"].items():
+                if isinstance(v, list):
+                    rec.setdefault(k, [])
+                    rec[k] = sorted(set(rec[k]) | set(v)) if k == "events" else rec[k] + [x for x in v if x not in rec[k]]
+                elif v:
+                    rec[k] = True
+        elif o["op"] == "gitconfig":
+            K.git(t, "config", "--local", o["key"], o["value"])
+            man["gitconfig"][o["key"]] = o["value"]
+    man["version"] = K.KIT_VERSION
+    save_manifest(t, man)
+
+
+# --------------------------------------------------------------------------
+# Uninstall
+# --------------------------------------------------------------------------
+
+def unmerge_json(data, rec):
+    perms = data.get("permissions")
+    if isinstance(perms, dict):
+        deny = perms.get("deny")
+        if isinstance(deny, list):
+            perms["deny"] = [r for r in deny if r not in rec.get("deny", [])]
+            if not perms["deny"]:
+                del perms["deny"]
+        if rec.get("disableBypass") and perms.get("disableBypassPermissionsMode") == "disable":
+            del perms["disableBypassPermissionsMode"]
+        if not perms:
+            del data["permissions"]
+    hooks = data.get("hooks")
+    if isinstance(hooks, dict):
+        for event in list(hooks):
+            if isinstance(hooks[event], list):
+                hooks[event] = [e for e in hooks[event] if K.GUARD_REF not in json.dumps(e)]
+                if not hooks[event]:
+                    del hooks[event]
+        if not hooks:
+            del data["hooks"]
+    if rec.get("version") and list(data.keys()) == ["version"]:
+        del data["version"]
+    return data
+
+
+def build_uninstall(target):
+    plan = Plan(target)
+    man = load_manifest(target)
+    if not os.path.exists(os.path.join(target, K.MANIFEST)):
+        plan.note("i", "No %s found: the kit is not installed here (or was installed by hand)." % K.MANIFEST)
+        return plan, man
+    for path in man["blocks"]:
+        full = os.path.join(target, path)
+        text = K.read(full)
+        if text is None:
+            continue
+        style = "md" if path.endswith(".md") else "sh"
+        new = K.remove_block(text, style)
+        if new == text:
+            continue
+        leftover = new.strip() in ("", "#!/bin/sh", "# AGENTS.md\n\nInstructions for AI coding agents working in this repository.")
+        if path in man["created"] and leftover:
+            plan.add({"op": "rm", "path": path, "verb": "delete", "why": "the kit created it"})
+        else:
+            plan.add({"op": "write", "path": path, "new": new, "verb": "remove-from", "why": "the kit's block only; your text stays"})
+    for path, digest in sorted(man["files"].items()):
+        full = os.path.join(target, path)
+        cur = K.read(full)
+        if cur is None:
+            continue
+        if K.sha256(cur) == digest:
+            plan.add({"op": "rm", "path": path, "verb": "delete", "why": "unchanged since install"})
+        else:
+            plan.note("!", "%s changed since the kit installed it, so it was kept." % path)
+    for path in man["symlinks"]:
+        if os.path.islink(os.path.join(target, path)):
+            plan.add({"op": "rm", "path": path, "verb": "delete", "why": "link to the skill"})
+    for path, rec in sorted(man["json"].items()):
+        full = os.path.join(target, path)
+        data, status = K.load_json(full)
+        if status != "ok" or not isinstance(data, dict):
+            continue
+        new = unmerge_json(copy.deepcopy(data), rec)
+        if new == data:
+            continue
+        if not new and rec.get("created"):
+            plan.add({"op": "rm", "path": path, "verb": "delete", "why": "the kit created it"})
+        else:
+            plan.add({"op": "write", "path": path, "new": json.dumps(new, indent=2) + "\n", "verb": "remove-from",
+                      "why": "only the kit's entries"})
+    for key, value in man["gitconfig"].items():
+        if K.git_out(target, "config", "--local", "--get", key) == value:
+            plan.add({"op": "unset", "key": key, "path": ".git/config", "verb": "unset", "why": "restores your previous hooks folder"})
+    plan.add({"op": "rm", "path": K.MANIFEST, "verb": "delete", "why": "the kit's record of what it added"})
+    return plan, man
+
+
+def apply_uninstall(plan):
+    t = plan.target
+    dirs = set()
+    for o in plan.ops:
+        full = os.path.join(t, o.get("path", ""))
+        if o["op"] == "rm":
+            if os.path.islink(full) or os.path.isfile(full):
+                os.remove(full)
+            dirs.add(os.path.dirname(full))
+        elif o["op"] == "write":
+            K.write(full, o["new"], executable=os.access(full, os.X_OK))
+        elif o["op"] == "unset":
+            K.git(t, "config", "--local", "--unset", o["key"])
+    # Remove folders the kit emptied (never a folder that still holds anything).
+    for d in sorted(dirs, key=len, reverse=True):
+        cur = d
+        while (cur.startswith(t + os.sep)) and os.sep + ".git" not in cur[len(t):]:
+            try:
+                os.rmdir(cur)
+            except OSError:
+                break
+            cur = os.path.dirname(cur)
+
+
+# --------------------------------------------------------------------------
+
+def confirm(question):
+    if not sys.stdin.isatty():
+        return False
+    try:
+        return input(question).strip().lower() in ("y", "yes")
+    except EOFError:
+        return False
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="install", description="Add the Build It Safe Kit to a repository.")
+    ap.add_argument("action", nargs="?", default="install", choices=["install", "uninstall"])
+    ap.add_argument("--target", default=".")
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--yes", "-y", action="store_true")
+    ap.add_argument("--agents")
+    ap.add_argument("--with-ci", action="store_true")
+    ap.add_argument("--no-ci", action="store_true")
+    ap.add_argument("--with-templates", action="store_true")
+    ap.add_argument("--lock-bypass", action="store_true")
+    ap.add_argument("--no-git-hooks", action="store_true")
+    args = ap.parse_args(argv[1:])
+    if args.agents is not None:
+        args.agents = [] if args.agents.strip() == "none" else [a.strip() for a in args.agents.split(",") if a.strip()]
+        bad = [a for a in args.agents if a not in K.AGENT_NAMES]
+        if bad:
+            ap.error("unknown agent(s): %s (choose from %s)" % (", ".join(bad), ", ".join(K.AGENT_NAMES)))
+    target = os.path.abspath(args.target)
+    if not os.path.isdir(target):
+        ap.error("target folder not found: %s" % target)
+    if os.path.realpath(target) == os.path.realpath(K.KIT_ROOT):
+        ap.error("the target is the kit itself; run this from the repository you want to protect, or pass --target")
+    paint = K.Paint(K.use_color())
+
+    if args.action == "uninstall":
+        plan, man = build_uninstall(target)
+        print_plan(plan, paint, "build-it-safe uninstall")
+    else:
+        man = load_manifest(target)
+        plan = build_plan(target, args)
+        print_plan(plan, paint, "build-it-safe install v%d" % K.KIT_VERSION)
+
+    real_ops = [o for o in plan.ops if o["op"] != "adopt"]
+    if not real_ops:
+        if plan.ops and not args.dry_run and args.action == "install":
+            apply_plan(plan, man)  # bookkeeping only: record files that already match the kit
+        return 0
+    print()
+    if args.dry_run:
+        print(paint.dim("Dry run: nothing was written."))
+        return 0
+    if not args.yes and not confirm("Apply these changes? [y/N] "):
+        print("Nothing was written. Run again with --yes to apply" + (" (or answer y)." if sys.stdin.isatty() else "."))
+        return 0
+    if args.action == "uninstall":
+        apply_uninstall(plan)
+        print(paint.green("Removed the kit's changes."))
+    else:
+        apply_plan(plan, man)
+        if real_ops:
+            print(paint.green("Done.") + " Next:")
+            print("  1. Review and commit the new files: git add -A && git commit -m \"Add Build It Safe Kit\"")
+            print("  2. Check the result:  python3 %s --target %s" % (os.path.relpath(os.path.join(K.KIT_ROOT, "tools", "doctor")),
+                                                                     os.path.relpath(target) if os.path.relpath(target) != "." else "."))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

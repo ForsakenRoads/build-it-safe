@@ -1,0 +1,12 @@
+{
+  "_comment": "build-it-safe settings for this repository. Only a human should edit this file; the guard stops agents from changing it.",
+  "guard_enabled": true,
+  "protected_branches": [
+    "main",
+    "master"
+  ],
+  "secret_paths": [],
+  "allow_paths": [],
+  "protected": [],
+  "_protected_format": "Each entry: {\"file\": \"src/auth/*.ts\", \"names\": [\"verifySession\", \"requireAdmin\"]}. The guard blocks edits that remove a listed name from a matching file."
+}

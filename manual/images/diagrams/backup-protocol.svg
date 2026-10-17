@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 375" width="800" height="375" font-family="Noto Sans, DejaVu Sans, sans-serif">
+  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#12324f"/></marker></defs>
+  <rect width="800" height="375" fill="#fff"/>
+  <!-- computer -->
+  <rect x="20" y="70" width="200" height="150" rx="12" fill="#eef3f8" stroke="#12324f" stroke-width="2.5"/>
+  <text x="120" y="102" font-size="18" font-weight="700" text-anchor="middle" fill="#12324f">Your computer</text>
+  <text x="120" y="135" font-size="14" text-anchor="middle" fill="#333">restic encrypts</text>
+  <text x="120" y="155" font-size="14" text-anchor="middle" fill="#333">before upload</text>
+  <text x="120" y="190" font-size="13" text-anchor="middle" fill="#555">password: manager + paper</text>
+  <!-- arrow with key -->
+  <path d="M225 145 L 435 145" stroke="#12324f" stroke-width="3" marker-end="url(#a)"/>
+  <rect x="250" y="95" width="160" height="36" rx="18" fill="#f2f7f1" stroke="#3b6e3b" stroke-width="2"/>
+  <text x="330" y="118" font-size="14" text-anchor="middle" fill="#2f5a2f">key: write, no delete</text>
+  <text x="330" y="172" font-size="13" text-anchor="middle" fill="#555">one bucket only</text>
+  <!-- bucket -->
+  <rect x="440" y="50" width="330" height="200" rx="12" fill="#fbf4ef" stroke="#9a3b1b" stroke-width="2.5"/>
+  <text x="605" y="82" font-size="18" font-weight="700" text-anchor="middle" fill="#8a3417">Off-site bucket (B2)</text>
+  <rect x="465" y="100" width="135" height="60" rx="6" fill="#fff" stroke="#9a3b1b" stroke-width="1.5"/>
+  <text x="532" y="126" font-size="14" text-anchor="middle" fill="#1a1a1a">current</text>
+  <text x="532" y="146" font-size="14" text-anchor="middle" fill="#1a1a1a">snapshots</text>
+  <rect x="615" y="100" width="135" height="60" rx="6" fill="#fff" stroke="#9a3b1b" stroke-width="1.5" stroke-dasharray="5 4"/>
+  <text x="682" y="126" font-size="14" text-anchor="middle" fill="#1a1a1a">"deleted" =</text>
+  <text x="682" y="146" font-size="14" text-anchor="middle" fill="#1a1a1a">hidden, kept</text>
+  <text x="605" y="190" font-size="14" text-anchor="middle" fill="#333">lifecycle rule: hidden files kept N days</text>
+  <text x="605" y="212" font-size="14" text-anchor="middle" fill="#333">optional: Object Lock on a second copy</text>
+  <!-- restore -->
+  <path d="M605 255 C 605 295, 120 295, 120 225" fill="none" stroke="#3b6e3b" stroke-width="3" stroke-dasharray="8 6" marker-end="url(#a)"/>
+  <text x="380" y="330" font-size="15" font-weight="700" text-anchor="middle" fill="#2f5a2f">Restore drill every month: bring files back and compare</text>
+  <text x="380" y="358" font-size="14" text-anchor="middle" fill="#333">Checks: weekly "restic check"; monthly, read 1/12 of the data</text>
+</svg>

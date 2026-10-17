@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+"""Copy the kit's single sources into plugin/ (the plugin may not reach outside its folder).
+
+Run after changing kit/guard/guard.py or kit/skills/. `--check` exits 1 if plugin/ is stale.
+"""
+import filecmp
+import os
+import shutil
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PAIRS = [
+    ("kit/guard/guard.py", "plugin/scripts/guard.py"),
+    ("kit/skills/secure-build", "plugin/skills/secure-build"),
+]
+
+
+def same(a, b):
+    if os.path.isfile(a):
+        return os.path.isfile(b) and filecmp.cmp(a, b, shallow=False)
+    if not os.path.isdir(b):
+        return False
+    cmp = filecmp.dircmp(a, b)
+    if cmp.left_only or cmp.right_only or cmp.funny_files:
+        return False
+    if filecmp.cmpfiles(a, b, cmp.common_files, shallow=False)[1:] != ([], []):
+        return False
+    return all(same(os.path.join(a, d), os.path.join(b, d)) for d in cmp.common_dirs)
+
+
+def main(argv):
+    stale = []
+    for src, dst in PAIRS:
+        s, d = os.path.join(ROOT, src), os.path.join(ROOT, dst)
+        if same(s, d):
+            continue
+        stale.append(dst)
+        if "--check" in argv:
+            continue
+        if os.path.isdir(s):
+            if os.path.isdir(d):
+                shutil.rmtree(d)
+            shutil.copytree(s, d)
+        else:
+            os.makedirs(os.path.dirname(d), exist_ok=True)
+            shutil.copy2(s, d)
+    if "--check" in argv:
+        if stale:
+            print("plugin/ is out of date: " + ", ".join(stale) + ". Run tools/build-plugin.")
+            return 1
+        print("plugin/ matches kit/.")
+        return 0
+    print("updated: " + (", ".join(stale) if stale else "nothing"))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

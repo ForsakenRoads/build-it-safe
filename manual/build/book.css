@@ -1,0 +1,144 @@
+/* Print layout for WeasyPrint: US Letter, single column, book style.
+   Fonts are open (SIL OFL) and installed: Noto Serif, Noto Sans, Noto Sans Mono. */
+
+@page {
+  size: letter;
+  margin: 0.85in 0.9in 0.9in 0.9in;
+  @bottom-center { content: counter(page); font: 9pt "Noto Sans", sans-serif; color: #555; }
+}
+@page :left {
+  @top-left { content: string(part); font: 8.5pt "Noto Sans", sans-serif; color: #666;
+              text-transform: uppercase; letter-spacing: 0.06em; }
+}
+@page :right {
+  @top-right { content: string(chapter); font: 8.5pt "Noto Sans", sans-serif; color: #666; }
+}
+@page :first { @bottom-center { content: none; } @top-left { content: none; } @top-right { content: none; } }
+@page bare {
+  @top-left { content: none; } @top-right { content: none; } @bottom-center { content: none; }
+}
+@page :blank { @top-left { content: none; } @top-right { content: none; } @bottom-center { content: none; } }
+@page opener { @top-left { content: none; } @top-right { content: none; } }
+
+html { font-family: "Noto Serif", serif; font-size: 10.5pt; line-height: 1.45; color: #1a1a1a;
+       hyphens: auto; }
+body { margin: 0; }
+p { margin: 0 0 0.55em 0; orphans: 3; widows: 3; text-align: left; }
+a { color: #1d4f7a; text-decoration: none; }
+strong { font-weight: 700; }
+
+/* ---------- Title page ---------- */
+.title-page { page: bare; height: 9.1in; display: flex; flex-direction: column;
+              justify-content: flex-start; padding-top: 2.6in; box-sizing: border-box; break-after: page; }
+.tp-title { font: 700 40pt/1.05 "Noto Sans", sans-serif; color: #12324f; margin: 0 0 0.25em 0; }
+.tp-subtitle { font: 400 17pt/1.3 "Noto Sans", sans-serif; color: #333; margin: 0 0 2.2em 0; }
+.tp-author { font: 600 14pt "Noto Sans", sans-serif; color: #9a3b1b; margin: 0 0 0.4em 0; }
+.tp-handle { font: 400 11pt "Noto Sans", sans-serif; color: #9a3b1b; margin: 0 0 1.2em 0; }
+.tp-edition { font: 10pt "Noto Sans", sans-serif; color: #666; }
+.tp-attribution { margin-top: 2.2in; max-width: 5.6in; font: 8.5pt/1.4 "Noto Sans", sans-serif; color: #555; }
+.tp-attribution p { margin: 0 0 0.5em 0; }
+.tp-attribution .tp-note { font-size: 7.5pt; color: #666; }
+
+/* ---------- Contents ---------- */
+nav.toc { page: bare; break-after: right; }
+.toc-title { font: 700 20pt "Noto Sans", sans-serif; color: #12324f; margin: 0 0 0.8em 0;
+             bookmark-level: 1; bookmark-label: "Contents"; }
+nav.toc ul { list-style: none; margin: 0; padding: 0; }
+nav.toc > ul > li { margin: 0.55em 0 0.1em 0; font: 600 10.5pt "Noto Sans", sans-serif; }
+nav.toc > ul > li > ul > li { margin: 0.12em 0 0.12em 1.4em; font: 400 9.8pt "Noto Serif", serif; }
+nav.toc a { color: #1a1a1a; }
+nav.toc a::after { content: leader(".") target-counter(attr(href), page); color: #444; }
+
+/* ---------- Headings ---------- */
+h1, h2, h3, h4 { font-family: "Noto Sans", sans-serif; color: #12324f; line-height: 1.2;
+                 break-after: avoid; hyphens: manual; }
+h1 { font-size: 26pt; font-weight: 700; margin: 0 0 0.7em 0; bookmark-level: 1;
+     string-set: part content(), chapter ""; }
+h2 { font-size: 18pt; font-weight: 700; margin: 0 0 0.8em 0; break-before: page;
+     bookmark-level: 2; string-set: chapter content(); }
+h3 { font-size: 12.5pt; font-weight: 700; margin: 1.2em 0 0.4em 0; bookmark-level: none; }
+h4 { font-size: 10.5pt; font-weight: 700; margin: 1em 0 0.3em 0; bookmark-level: none; }
+
+/* Part openers (h1.part) start on a right-hand page with no running head;
+   the part's short introduction (div.part-intro) shares that page. */
+h1.part { page: opener; break-before: right; margin-top: 2in; font-size: 30pt;
+          border-top: 3px solid #9a3b1b; padding-top: 0.35em; }
+.part-intro { page: opener; break-after: page; }
+.part-intro p { font-size: 11.5pt; max-width: 5.2in; }
+/* Front and back matter (h1.matter): a new page each. */
+h1.matter { break-before: page; font-size: 22pt; string-set: part content(), chapter content(); }
+
+/* A chapter's opening line under the heading. */
+.dek { font-style: italic; color: #444; font-size: 11pt; margin-bottom: 1em; }
+
+/* ---------- Lists ---------- */
+ul, ol { margin: 0.2em 0 0.7em 0; padding-left: 1.4em; }
+li { margin: 0.12em 0; }
+li > p { margin: 0 0 0.25em 0; }
+
+/* ---------- Boxes ---------- */
+.box { border-left: 4px solid #12324f; background: #f3f6f9; padding: 0.55em 0.85em 0.3em 0.85em;
+       margin: 0.9em 0 1em 0; break-inside: avoid; font-size: 10pt; }
+.box > p:first-child { font: 700 9.5pt "Noto Sans", sans-serif; text-transform: uppercase;
+                       letter-spacing: 0.05em; margin-bottom: 0.35em; color: #12324f; }
+.box.plain-words { border-color: #3b6e3b; background: #f2f7f1; }
+.box.plain-words > p:first-child { color: #2f5a2f; }
+.box.do-this { border-color: #9a3b1b; background: #fbf4ef; }
+.box.do-this > p:first-child { color: #8a3417; }
+.box.do-this ul { list-style: none; padding-left: 1.5em; }
+.box.do-this li::before { content: "\2610"; font-family: "DejaVu Sans", sans-serif;
+                          margin-left: -1.4em; width: 1.4em; display: inline-block; }
+.box.ask-agent { border-color: #5b4a8a; background: #f5f3fa; }
+.box.ask-agent > p:first-child { color: #4a3b78; }
+.box.watch-out { border-color: #b8860b; background: #fdf8e8; }
+.box.watch-out > p:first-child { color: #7d5b00; }
+.box.start-card { font-size: 11pt; padding: 0.8em 1em 0.5em 1em; margin-top: 1.4em; }
+.box.start-card li { margin: 0.5em 0; }
+.box.lesson { border-color: #12324f; background: #eef3f8; }
+.box ul { margin-bottom: 0.4em; }
+.box pre { background: #fff; }
+
+/* ---------- Code ---------- */
+code { font-family: "Noto Sans Mono", "DejaVu Sans Mono", monospace; font-size: 0.86em;
+       background: #f1f1ee; padding: 0 0.15em; border-radius: 2px; hyphens: none;
+       overflow-wrap: anywhere; }
+pre { font-family: "Noto Sans Mono", "DejaVu Sans Mono", monospace; font-size: 8.3pt;
+      line-height: 1.38; background: #f4f4f1; border: 1px solid #ddd; padding: 0.5em 0.7em;
+      white-space: pre-wrap; overflow-wrap: anywhere; break-inside: avoid; margin: 0.5em 0 0.9em 0; }
+pre code { background: none; padding: 0; font-size: inherit; }
+
+/* ---------- Figures ---------- */
+figure { margin: 1em 0 1.2em 0; break-inside: avoid; text-align: center; }
+figure img { max-width: 100%; max-height: 6.6in; }
+figcaption { font: 9pt/1.35 "Noto Sans", sans-serif; color: #444; margin-top: 0.4em;
+             text-align: left; }
+
+/* ---------- Tables ---------- */
+table { border-collapse: collapse; width: 100%; margin: 0.6em 0 1em 0; font-size: 9pt;
+        line-height: 1.3; break-inside: auto; }
+th, td { border-bottom: 1px solid #ccc; padding: 0.3em 0.45em; text-align: left; vertical-align: top; }
+th { font-family: "Noto Sans", sans-serif; font-weight: 700; background: #eef1f4; }
+tr { break-inside: avoid; }
+thead { display: table-header-group; }
+
+/* ---------- Source notes ---------- */
+.cite { font-family: "Noto Sans", sans-serif; font-size: 0.68em; vertical-align: super;
+        line-height: 0; white-space: nowrap; }
+.cite a { color: #1d4f7a; }
+.source { font-size: 8.8pt; line-height: 1.35; margin: 0 0 0.4em 2.2em; text-indent: -2.2em;
+          overflow-wrap: anywhere; break-inside: avoid; }
+.source p { margin: 0; }
+.srcnum { display: inline-block; width: 2.2em; text-indent: 0; font-weight: 700;
+          font-family: "Noto Sans", sans-serif; }
+.source a { color: #1d4f7a; }
+
+blockquote { margin: 0.6em 1.2em; font-style: italic; color: #333; }
+hr { border: none; border-top: 1px solid #ccc; margin: 1.2em 0; }
+.attribution-note { font-size: 8.5pt; color: #555; margin: -0.2em 0 0.9em 0; }
+.draft-note { border: 2px dashed #9a3b1b; padding: 0.4em 0.7em; color: #8a3417;
+              font: 600 9.5pt "Noto Sans", sans-serif; margin-bottom: 1em; }
+.glossary dt { font-weight: 700; font-family: "Noto Sans", sans-serif; margin-top: 0.5em;
+               break-after: avoid; }
+.glossary dd { margin: 0 0 0.3em 1.2em; }
+
+.nohyph { hyphens: none; white-space: nowrap; }

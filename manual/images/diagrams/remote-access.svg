@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 400" width="800" height="400" font-family="Noto Sans, DejaVu Sans, sans-serif">
+  <defs>
+    <marker id="r" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#9a3b1b"/></marker>
+    <marker id="g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#3b6e3b"/></marker>
+  </defs>
+  <rect width="800" height="400" fill="#fff"/>
+  <!-- top: exposed -->
+  <text x="20" y="32" font-size="18" font-weight="700" fill="#8a3417">Exposed: the dashboard listens to the whole internet</text>
+  <rect x="560" y="50" width="220" height="110" rx="12" fill="#fbf4ef" stroke="#9a3b1b" stroke-width="2.5"/>
+  <text x="670" y="82" font-size="16" font-weight="700" text-anchor="middle" fill="#8a3417">Agent server</text>
+  <text x="670" y="108" font-size="14" text-anchor="middle" fill="#333">dashboard on a</text>
+  <text x="670" y="128" font-size="14" text-anchor="middle" fill="#333">public address</text>
+  <g font-size="14" fill="#333">
+    <text x="30" y="80">you</text><text x="30" y="115">a scanner</text><text x="30" y="150">an attacker</text>
+  </g>
+  <g stroke="#9a3b1b" stroke-width="2.5"><path d="M110 75 L555 90" marker-end="url(#r)"/><path d="M110 110 L555 105" marker-end="url(#r)"/><path d="M110 145 L555 120" marker-end="url(#r)"/></g>
+  <line x1="20" y1="190" x2="780" y2="190" stroke="#ccc" stroke-width="2" stroke-dasharray="6 6"/>
+  <!-- bottom: tunnel -->
+  <text x="20" y="225" font-size="18" font-weight="700" fill="#2f5a2f">Tunnelled: the dashboard listens only to its own machine</text>
+  <rect x="560" y="245" width="220" height="120" rx="12" fill="#f2f7f1" stroke="#3b6e3b" stroke-width="2.5"/>
+  <text x="670" y="277" font-size="16" font-weight="700" text-anchor="middle" fill="#2f5a2f">Agent server</text>
+  <text x="670" y="303" font-size="14" text-anchor="middle" fill="#333">dashboard on</text>
+  <text x="670" y="323" font-size="14" text-anchor="middle" font-family="Noto Sans Mono, DejaVu Sans Mono, monospace" fill="#1a1a1a">127.0.0.1</text>
+  <text x="670" y="347" font-size="13" text-anchor="middle" fill="#555">(loopback only)</text>
+  <text x="30" y="300" font-size="14" fill="#333">you</text>
+  <rect x="110" y="282" width="445" height="30" rx="15" fill="#eef3f8" stroke="#12324f" stroke-width="2"/>
+  <text x="332" y="302" font-size="14" text-anchor="middle" fill="#12324f">encrypted SSH tunnel or private mesh network</text>
+  <path d="M70 296 L105 296" stroke="#3b6e3b" stroke-width="2.5" marker-end="url(#g)"/>
+  <text x="30" y="355" font-size="14" fill="#333">an attacker</text>
+  <path d="M120 350 L330 350" stroke="#9a3b1b" stroke-width="2.5"/>
+  <text x="345" y="356" font-size="20" font-weight="700" fill="#9a3b1b">✕</text>
+  <text x="370" y="355" font-size="13" fill="#555">nothing to find</text>
+</svg>

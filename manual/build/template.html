@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="$lang$">
+<head>
+<meta charset="utf-8">
+<title>$fulltitle$</title>
+<meta name="author" content="$for(author)$$author$$sep$; $endfor$">
+<meta name="description" content="$subtitle$">
+$for(css)$
+<link rel="stylesheet" href="$css$">
+$endfor$
+</head>
+<body>
+<section class="title-page">
+<p class="tp-title">$title$</p>
+<p class="tp-subtitle">$subtitle$</p>
+<p class="tp-author">$for(author)$$author$$sep$, $endfor$</p>
+<p class="tp-handle">$handle$</p>
+<p class="tp-edition">$edition$</p>
+<div class="tp-attribution">
+<p>$attribution$</p>
+<p class="tp-note">$attribution-note$</p>
+</div>
+</section>
+<nav id="TOC" class="toc" role="doc-toc">
+<p class="toc-title">Contents</p>
+$table-of-contents$
+</nav>
+$body$
+</body>
+</html>

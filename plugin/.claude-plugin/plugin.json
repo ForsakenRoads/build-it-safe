@@ -1,0 +1,19 @@
+{
+  "name": "build-it-safe",
+  "displayName": "Build It Safe Kit",
+  "version": "0.1.0",
+  "description": "Guardrails for AI coding agents: a PreToolUse guard that blocks reading secret files, destructive commands, curl | sh, skipped git hooks and literal keys in files, plus the secure-build skill.",
+  "author": {
+    "name": "Forsaken Roads"
+  },
+  "homepage": "https://github.com/ForsakenRoads/build-it-safe",
+  "repository": "https://github.com/ForsakenRoads/build-it-safe",
+  "license": "Apache-2.0",
+  "keywords": [
+    "security",
+    "secrets",
+    "guardrails",
+    "hooks",
+    "gitleaks"
+  ]
+}

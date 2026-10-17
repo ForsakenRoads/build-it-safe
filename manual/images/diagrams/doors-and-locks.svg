@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 340" width="800" height="340" font-family="Noto Sans, DejaVu Sans, sans-serif">
+  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#12324f"/></marker></defs>
+  <rect width="800" height="340" fill="#fff"/>
+  <!-- visitor -->
+  <circle cx="70" cy="150" r="26" fill="#eef3f8" stroke="#12324f" stroke-width="2.5"/>
+  <rect x="44" y="180" width="52" height="60" rx="18" fill="#eef3f8" stroke="#12324f" stroke-width="2.5"/>
+  <text x="70" y="270" font-size="15" text-anchor="middle" fill="#333">A request</text>
+  <path d="M110 190 L 175 190" stroke="#12324f" stroke-width="3" marker-end="url(#a)"/>
+  <!-- authentication -->
+  <rect x="180" y="95" width="220" height="190" rx="12" fill="#f2f7f1" stroke="#3b6e3b" stroke-width="2.5"/>
+  <text x="290" y="128" font-size="19" font-weight="700" text-anchor="middle" fill="#2f5a2f">1. Authentication</text>
+  <text x="290" y="160" font-size="16" text-anchor="middle" fill="#1a1a1a">"Who are you?"</text>
+  <text x="290" y="200" font-size="14" text-anchor="middle" fill="#333">the ID check at the desk:</text>
+  <text x="290" y="222" font-size="14" text-anchor="middle" fill="#333">signing in, a passkey,</text>
+  <text x="290" y="244" font-size="14" text-anchor="middle" fill="#333">a session</text>
+  <path d="M405 190 L 470 190" stroke="#12324f" stroke-width="3" marker-end="url(#a)"/>
+  <!-- authorization -->
+  <rect x="475" y="95" width="230" height="190" rx="12" fill="#fbf4ef" stroke="#9a3b1b" stroke-width="2.5"/>
+  <text x="590" y="128" font-size="19" font-weight="700" text-anchor="middle" fill="#8a3417">2. Authorization</text>
+  <text x="590" y="160" font-size="16" text-anchor="middle" fill="#1a1a1a">"May you open this?"</text>
+  <text x="590" y="200" font-size="14" text-anchor="middle" fill="#333">the room key: checked for</text>
+  <text x="590" y="222" font-size="14" text-anchor="middle" fill="#333">every record, every time</text>
+  <text x="590" y="244" font-size="14" text-anchor="middle" fill="#333">(RLS, security rules)</text>
+  <path d="M710 190 L 760 190" stroke="#12324f" stroke-width="3" marker-end="url(#a)"/>
+  <rect x="742" y="160" width="40" height="60" rx="4" fill="#12324f"/>
+  <text x="762" y="245" font-size="14" text-anchor="middle" fill="#333">data</text>
+  <!-- server band -->
+  <rect x="170" y="40" width="620" height="34" rx="6" fill="#12324f"/>
+  <text x="480" y="63" font-size="16" font-weight="700" text-anchor="middle" fill="#fff">Both checks happen on the server, never only in the browser</text>
+  <text x="400" y="320" font-size="15" text-anchor="middle" fill="#333">Most leaks in AI-built apps pass check 1 and skip check 2.</text>
+</svg>

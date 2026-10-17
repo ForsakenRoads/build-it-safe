@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: Apache-2.0
+# Build It Safe, Forsaken Roads® (https://github.com/ForsakenRoads/build-it-safe). See NOTICE.
+# gitleaks configuration (added by the Build It Safe Kit).
+# It keeps gitleaks' built-in rules for hundreds of key formats.
+[extend]
+useDefault = true
+
+# A false alarm? Ask a maintainer to allowlist the exact file or value here,
+# with a comment saying why. Never allowlist a real key: remove and rotate it.
+#
+# [[allowlists]]
+# description = "test fixtures that hold fake keys"
+# paths = ['''^tests/fixtures/''']

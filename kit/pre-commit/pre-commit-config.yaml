@@ -1,0 +1,22 @@
+# build-it-safe hooks for the pre-commit framework (https://pre-commit.com).
+# If your repository already has a .pre-commit-config.yaml, copy the entries
+# under `repos:` into it. The kit's own git hooks are not needed then, but keep
+# the pre-push scan or the CI workflow, because pre-commit runs on staged files only.
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: 83d9cd684c87d95d656c1458ef04895a7f1cbd8e  # frozen: v8.30.1
+    hooks:
+      - id: gitleaks
+  - repo: local
+    hooks:
+      - id: build-it-safe-hidden-text
+        name: Hidden characters in agent rules files
+        entry: python3 .build-it-safe/hidden_text.py
+        language: system
+        files: '(^|/)(AGENTS(\.override)?\.md|CLAUDE(\.local)?\.md|GEMINI\.md|SKILL\.md|\.cursorrules|\.windsurfrules|copilot-instructions\.md|\.mcp\.json)$|^\.(cursor|claude|agents|codex|gemini|build-it-safe)/'
+  # Alternative to the local hook above: the upstream anti-trojan-source hook
+  # (Apache-2.0). It also reports emoji joiners, which the kit's wrapper skips.
+  # - repo: https://github.com/lirantal/anti-trojan-source
+  #   rev: 5c95bf53b3768b895038165d4dc086108db1b12a  # frozen: v1.13.0
+  #   hooks:
+  #     - id: anti-trojan-source

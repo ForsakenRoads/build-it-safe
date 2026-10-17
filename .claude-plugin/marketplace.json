@@ -1,0 +1,18 @@
+{
+  "name": "build-it-safe",
+  "owner": {
+    "name": "Forsaken Roads"
+  },
+  "description": "The Build It Safe Kit for people who build with AI agents.",
+  "plugins": [
+    {
+      "name": "build-it-safe",
+      "source": "./plugin",
+      "description": "Guardrails for AI coding agents: a PreToolUse guard plus the secure-build skill.",
+      "version": "0.1.0",
+      "homepage": "https://github.com/ForsakenRoads/build-it-safe",
+      "repository": "https://github.com/ForsakenRoads/build-it-safe",
+      "license": "Apache-2.0"
+    }
+  ]
+}

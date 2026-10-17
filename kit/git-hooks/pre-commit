@@ -1,0 +1,87 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+# Build It Safe, Forsaken Roads® (https://github.com/ForsakenRoads/build-it-safe). See NOTICE.
+# build-it-safe pre-commit hook v1
+# Stops a commit when the staged changes contain what looks like a key
+# (gitleaks), or when an agent rules file contains hidden characters.
+# POSIX sh; works on Linux, macOS and Git for Windows.
+
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+KIT="$ROOT/.build-it-safe"
+status=0
+
+find_gitleaks() {
+  if [ -n "${BUILD_IT_SAFE_GITLEAKS:-}" ] && [ -x "$BUILD_IT_SAFE_GITLEAKS" ]; then echo "$BUILD_IT_SAFE_GITLEAKS"; return; fi
+  if command -v gitleaks >/dev/null 2>&1; then command -v gitleaks; return; fi
+  for d in "$HOME/.local/bin" /opt/homebrew/bin /usr/local/bin "$HOME/go/bin" "$HOME/bin"; do
+    if [ -x "$d/gitleaks" ]; then echo "$d/gitleaks"; return; fi
+  done
+}
+
+# gitleaks reads `git diff` output. If colour is forced on (color.ui or
+# color.diff = always, in a config file or with `git -c ... commit`), that
+# output carries colour codes and gitleaks silently finds nothing (seen with
+# gitleaks 8.30.1). `gitleaks git --pre-commit` runs `git diff` itself, so we
+# cannot add --no-color to it. Instead, for the gitleaks run only:
+#   * drop GIT_CONFIG_PARAMETERS, the channel `git -c` uses (it beats the
+#     GIT_CONFIG_* variables below, so it must go);
+#   * set color.ui and color.diff to never with GIT_CONFIG_COUNT (git 2.31+),
+#     which beats every config file. Appended last, so it beats earlier entries.
+# (Piping `git diff --no-color` into `gitleaks stdin` would also work, but stdin
+# findings carry no file name, path allowlists in .gitleaks.toml stop applying,
+# and removed lines would be scanned too.)
+no_colour_env() {
+  unset GIT_CONFIG_PARAMETERS
+  n=${GIT_CONFIG_COUNT:-0}
+  eval "GIT_CONFIG_KEY_$n=color.ui GIT_CONFIG_VALUE_$n=never; export GIT_CONFIG_KEY_$n GIT_CONFIG_VALUE_$n"
+  n=$((n + 1))
+  eval "GIT_CONFIG_KEY_$n=color.diff GIT_CONFIG_VALUE_$n=never; export GIT_CONFIG_KEY_$n GIT_CONFIG_VALUE_$n"
+  GIT_CONFIG_COUNT=$((n + 1)); export GIT_CONFIG_COUNT
+}
+
+PY=$(command -v python3 || command -v python || true)
+GL=$(find_gitleaks)
+# Ratchet: findings recorded in .gitleaks-baseline.json are old and accepted; new ones fail.
+BASELINE=""
+[ -f "$ROOT/.gitleaks-baseline.json" ] && BASELINE="--baseline-path .gitleaks-baseline.json"  # relative: the scan runs from $ROOT
+if [ -n "$GL" ]; then
+  (no_colour_env; cd "$ROOT" && "$GL" git --pre-commit --staged --redact --no-banner --verbose --log-level warn $BASELINE .) || status=1
+else
+  echo "build-it-safe: gitleaks is not installed, so only the kit's basic key patterns ran." >&2
+  echo "  Install gitleaks for full coverage: https://github.com/gitleaks/gitleaks#installing" >&2
+  if [ -n "$PY" ] && [ -f "$KIT/guard.py" ]; then
+    git diff --cached -U0 --no-color | "$PY" "$KIT/guard.py" --scan-diff || status=1
+  fi
+fi
+
+if [ -n "$PY" ] && [ -f "$KIT/hidden_text.py" ]; then
+  (cd "$ROOT" && "$PY" "$KIT/hidden_text.py" --staged) || status=1
+fi
+
+if [ "$status" -ne 0 ]; then
+  cat >&2 <<'EOF'
+
+build-it-safe: commit stopped.
+  If a real key was found: take it out of the file and keep it in .env (which git ignores).
+  If that key was ever pushed, pasted or shared, revoke it at the provider and make a new one.
+  If it is a false alarm: ask a maintainer to add an allowlist entry to .gitleaks.toml.
+  Do not use --no-verify: the same scan runs again on push and in CI.
+EOF
+  exit 1
+fi
+
+# Chain to the hook git would have run without the kit.
+SELF_DIR=$(cd "$(dirname "$0")" && pwd -P)
+HOOKS_DIR=$(cd "$(git rev-parse --git-path hooks 2>/dev/null)" 2>/dev/null && pwd -P)
+# Chain only when git runs this folder as its hooks folder (core.hooksPath set by
+# the kit). When an existing hook calls this script, that hook carries on itself.
+if [ -d "$KIT/git-hooks" ] && [ "$SELF_DIR" = "$(cd "$KIT/git-hooks" && pwd -P)" ] && [ "$HOOKS_DIR" = "$SELF_DIR" ]; then
+  PREV=$(git config --global --type=path --get core.hooksPath 2>/dev/null || git config --system --type=path --get core.hooksPath 2>/dev/null || true)
+  GITDIR=$(git rev-parse --git-common-dir 2>/dev/null)
+  if [ -n "$PREV" ] && [ -x "$PREV/pre-commit" ] && [ "$(cd "$PREV" 2>/dev/null && pwd -P)" != "$SELF_DIR" ]; then
+    exec "$PREV/pre-commit" "$@"
+  elif [ -z "$PREV" ] && [ -x "$GITDIR/hooks/pre-commit" ]; then
+    exec "$GITDIR/hooks/pre-commit" "$@"
+  fi
+fi
+exit 0

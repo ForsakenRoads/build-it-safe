@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 385" width="800" height="385" font-family="Noto Sans, DejaVu Sans, sans-serif">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#12324f"/></marker>
+    <marker id="arrRed" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#9a3b1b"/></marker>
+  </defs>
+  <rect x="0" y="0" width="800" height="385" fill="#ffffff"/>
+  <!-- Server -->
+  <rect x="30" y="40" width="320" height="300" rx="14" fill="#eef3f8" stroke="#12324f" stroke-width="2.5"/>
+  <text x="190" y="75" font-size="22" font-weight="700" text-anchor="middle" fill="#12324f">Your server</text>
+  <text x="190" y="100" font-size="15" text-anchor="middle" fill="#333">private: only you can read it</text>
+  <rect x="55" y="125" width="270" height="44" rx="6" fill="#fff" stroke="#3b6e3b" stroke-width="2"/>
+  <text x="70" y="153" font-size="15" font-family="Noto Sans Mono, DejaVu Sans Mono, monospace" fill="#1a1a1a">OPENAI_API_KEY</text>
+  <text x="312" y="153" font-size="14" text-anchor="end" fill="#2f5a2f">stays here</text>
+  <rect x="55" y="180" width="270" height="44" rx="6" fill="#fff" stroke="#3b6e3b" stroke-width="2"/>
+  <text x="70" y="208" font-size="15" font-family="Noto Sans Mono, DejaVu Sans Mono, monospace" fill="#1a1a1a">DATABASE_URL</text>
+  <text x="312" y="208" font-size="14" text-anchor="end" fill="#2f5a2f">stays here</text>
+  <rect x="55" y="250" width="270" height="44" rx="6" fill="#fff4ef" stroke="#9a3b1b" stroke-width="2"/>
+  <text x="70" y="278" font-size="15" font-family="Noto Sans Mono, DejaVu Sans Mono, monospace" fill="#1a1a1a">NEXT_PUBLIC_…</text>
+  <text x="312" y="278" font-size="14" text-anchor="end" fill="#8a3417">copied out</text>
+  <!-- Browser -->
+  <rect x="450" y="40" width="320" height="300" rx="14" fill="#fbf4ef" stroke="#9a3b1b" stroke-width="2.5"/>
+  <text x="610" y="75" font-size="22" font-weight="700" text-anchor="middle" fill="#8a3417">Every visitor's browser</text>
+  <text x="610" y="100" font-size="15" text-anchor="middle" fill="#333">public: anyone can read it</text>
+  <rect x="475" y="125" width="270" height="170" rx="6" fill="#fff" stroke="#bbb" stroke-width="1.5"/>
+  <text x="490" y="150" font-size="14" fill="#555">the JavaScript it downloads</text>
+  <text x="490" y="185" font-size="15" font-family="Noto Sans Mono, DejaVu Sans Mono, monospace" fill="#1a1a1a">NEXT_PUBLIC_…</text>
+  <text x="490" y="215" font-size="14" fill="#8a3417">visible in the browser's</text>
+  <text x="490" y="235" font-size="14" fill="#8a3417">built-in developer tools</text>
+  <path d="M325 272 C 390 272, 410 190, 470 190" fill="none" stroke="#9a3b1b" stroke-width="3" marker-end="url(#arrRed)"/>
+  <text x="400" y="368" font-size="16" font-weight="700" text-anchor="middle" fill="#333">Rule: anything sent to the browser is public.</text>
+</svg>

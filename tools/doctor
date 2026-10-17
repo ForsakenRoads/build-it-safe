@@ -1,0 +1,305 @@
+#!/usr/bin/env python3
+"""build-it-safe doctor: what is in place, what is missing, and what to do next.
+
+  doctor [--target DIR] [--agents LIST]
+
+It only reads. It never opens .env or key files: it checks their names, and
+whether git ignores them. Exit code 0 when nothing is marked ✗, 1 otherwise.
+"""
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import kitlib as K  # noqa: E402
+
+PUBLIC_SECRET_RE = re.compile(
+    r"\b(?:NEXT_PUBLIC|VITE|EXPO_PUBLIC|REACT_APP|NUXT_PUBLIC|PUBLIC)_[A-Z0-9_]*"
+    r"(?:SECRET|SERVICE_ROLE|PRIVATE|PASSWORD|_SK|SK_LIVE|ADMIN_KEY|OPENAI|ANTHROPIC|GEMINI_API|STRIPE_SECRET)[A-Z0-9_]*\b")
+TEXT_EXT = (".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".vue", ".svelte", ".astro", ".py", ".md",
+            ".json", ".yml", ".yaml", ".toml", ".example", ".sample", ".html")
+
+
+class Report:
+    def __init__(self, paint):
+        self.p = paint
+        self.rows = []
+        self.steps = []
+        self.fail = False
+
+    def section(self, title):
+        self.rows.append(("", self.p.bold(title), ""))
+
+    def ok(self, text):
+        self.rows.append((self.p.green("✓"), text, ""))
+
+    def bad(self, text, step=None):
+        self.fail = True
+        self.rows.append((self.p.red("✗"), text, ""))
+        if step:
+            self.steps.append(step)
+
+    def warn(self, text, step=None):
+        self.rows.append((self.p.yellow("!"), text, ""))
+        if step:
+            self.steps.append(step)
+
+    def info(self, text):
+        self.rows.append((self.p.cyan("i"), text, ""))
+
+    def show(self):
+        for mark, text, _ in self.rows:
+            if not mark:
+                print("\n" + text)
+            else:
+                print("  %s %s" % (mark, K.wrap(text, 4)))
+        print()
+        if self.steps:
+            print(self.p.bold("Next steps:"))
+            seen = []
+            for s in self.steps:
+                if s not in seen:
+                    seen.append(s)
+            for i, s in enumerate(seen, 1):
+                print(K.wrap(s, 5, first="  %d. " % i))
+        else:
+            print(self.p.green("All set. Run the doctor again after big changes, and before you launch."))
+
+
+def guard_selftest(target):
+    guard = os.path.join(target, K.RUNTIME, "guard.py")
+    if not os.path.isfile(guard):
+        return None
+    cases = [
+        ({"tool_name": "Bash", "tool_input": {"command": "cat .env"}}, 2),
+        ({"tool_name": "Read", "tool_input": {"file_path": os.path.join(target, ".env")}}, 2),
+        ({"tool_name": "Bash", "tool_input": {"command": "git push --force origin main"}}, 2),
+        ({"tool_name": "Bash", "tool_input": {"command": "ls"}}, 0),
+        ({"tool_name": "Read", "tool_input": {"file_path": os.path.join(target, ".env.example")}}, 0),
+    ]
+    py = sys.executable or "python3"
+    for payload, want in cases:
+        payload["cwd"] = target
+        try:
+            r = subprocess.run([py, guard], input=json.dumps(payload), capture_output=True, text=True,
+                               timeout=30, cwd=target, env=dict(os.environ, CLAUDE_PROJECT_DIR=target))
+        except Exception:
+            return False
+        if r.returncode != want:
+            return False
+    return True
+
+
+def has_block(path):
+    t = K.read(path)
+    return bool(t and K.find_block(t, "md"))
+
+
+def check(target, agents_override):
+    paint = K.Paint(K.use_color())
+    rep = Report(paint)
+    det = K.detect(target, agents_override)
+    man_path = os.path.join(target, K.MANIFEST)
+    kit_cmd = "python3 %s --target %s" % (os.path.relpath(os.path.join(K.KIT_ROOT, "tools", "install")),
+                                          os.path.relpath(target))
+    print(paint.bold("build-it-safe doctor") + "  " + paint.dim(target))
+    print("  agents:     " + (", ".join(K.AGENT_NAMES[a] for a in sorted(det["agents"])) or "none detected"))
+    print("  frameworks: " + (", ".join(sorted(det["frameworks"])) or "none detected"))
+
+    # --- Rules for agents
+    rep.section("Rules for agents")
+    if has_block(os.path.join(target, "AGENTS.md")):
+        rep.ok("AGENTS.md has the security rules block")
+    else:
+        rep.bad("AGENTS.md has no security rules block", "Install the kit: " + kit_cmd)
+    if "claude" in det["agents"]:
+        cm = os.path.join(target, "CLAUDE.md")
+        cm2 = os.path.join(target, ".claude", "CLAUDE.md")
+        text = (K.read(cm) or "") + (K.read(cm2) or "")
+        if K.find_block(text, "md") or re.search(r"(^|\s)@AGENTS\.md\b", text):
+            rep.ok("Claude Code reads the rules (CLAUDE.md)")
+        elif not os.path.exists(cm) and not os.path.exists(cm2):
+            rep.ok("Claude Code reads AGENTS.md (no CLAUDE.md here; needs Claude Code 2.1.277 or later)")
+        else:
+            rep.bad("CLAUDE.md exists but has no security block, so Claude Code does not read AGENTS.md",
+                    "Install the kit to add the block to CLAUDE.md: " + kit_cmd)
+    if "gemini" in det["agents"]:
+        if has_block(os.path.join(target, "GEMINI.md")):
+            rep.ok("GEMINI.md has the security rules block")
+        else:
+            rep.warn("Gemini CLI reads GEMINI.md, which has no security block", "Install the kit: " + kit_cmd)
+    if os.path.isfile(os.path.join(target, ".agents", "skills", "secure-build", "SKILL.md")):
+        rep.ok("secure-build skill in .agents/skills (Codex, Cursor, Copilot, Gemini CLI)")
+    else:
+        rep.bad("secure-build skill missing from .agents/skills", "Install the kit: " + kit_cmd)
+    if "claude" in det["agents"]:
+        if os.path.isfile(os.path.join(target, ".claude", "skills", "secure-build", "SKILL.md")):
+            rep.ok("secure-build skill visible to Claude Code (.claude/skills)")
+        else:
+            rep.bad("Claude Code cannot see the secure-build skill (.claude/skills/secure-build)", "Install the kit: " + kit_cmd)
+
+    # --- Guardrails
+    rep.section("Guardrails (code, not words)")
+    st = guard_selftest(target)
+    if st is None:
+        rep.bad("the guard (.build-it-safe/guard.py) is not installed", "Install the kit: " + kit_cmd)
+    elif st:
+        rep.ok("the guard works: it blocks `cat .env`, reading .env and force-pushing main, and allows normal work")
+    else:
+        rep.bad("the guard did not pass its self-test", "Reinstall the kit (" + kit_cmd + ") and run the doctor again")
+    if "claude" in det["agents"]:
+        data, status = K.load_json(os.path.join(target, ".claude", "settings.json"))
+        if status == "ok" and isinstance(data, dict):
+            hooks = (data.get("hooks") or {}).get("PreToolUse") or []
+            deny = (data.get("permissions") or {}).get("deny") or []
+            if any(K.GUARD_REF in json.dumps(h) for h in hooks):
+                rep.ok("Claude Code runs the guard before every tool call (.claude/settings.json)")
+            else:
+                rep.bad("Claude Code is not set to run the guard", "Install the kit: " + kit_cmd)
+            if "Read(.env)" in deny or "Read(./.env)" in deny:
+                rep.ok("Claude Code deny rules cover .env and key files (%d rules)" % len(deny))
+            else:
+                rep.warn("no Claude Code deny rule for .env", "Install the kit: " + kit_cmd)
+        elif status == "invalid":
+            rep.bad(".claude/settings.json is not valid JSON", "Fix .claude/settings.json, then install the kit")
+        else:
+            rep.bad("Claude Code has no project settings with the guard", "Install the kit: " + kit_cmd)
+        locked = False
+        for p in (os.path.join(target, ".claude", "settings.json"), os.path.join(target, ".claude", "settings.local.json"),
+                  os.path.join(os.path.expanduser("~"), ".claude", "settings.json")):
+            d, s = K.load_json(p)
+            if s == "ok" and isinstance(d, dict) and (d.get("permissions") or {}).get("disableBypassPermissionsMode") == "disable":
+                locked = True
+        if locked:
+            rep.ok("bypass mode (--dangerously-skip-permissions) is switched off")
+        else:
+            rep.info("bypass mode (--dangerously-skip-permissions) is still allowed. Malware has used it (the Nx attack). "
+                     "To switch it off for you, add \"permissions\": {\"disableBypassPermissionsMode\": \"disable\"} to ~/.claude/settings.json")
+    for agent, path, label in (("cursor", ".cursor/hooks.json", "Cursor"), ("codex", ".codex/hooks.json", "Codex"),
+                               ("copilot", ".github/hooks/build-it-safe.json", "Copilot"), ("gemini", ".gemini/settings.json", "Gemini CLI")):
+        if agent not in det["agents"]:
+            continue
+        t = K.read(os.path.join(target, path)) or ""
+        if K.GUARD_REF in t:
+            rep.ok("%s runs the guard (%s)" % (label, path))
+        else:
+            rep.bad("%s is not set to run the guard (%s)" % (label, path), "Install the kit: " + kit_cmd)
+
+    # --- Secrets in the repository
+    rep.section("Secrets and git")
+    if not det["git"]:
+        rep.bad("this folder is not a git repository, so nothing scans commits", "Run `git init`, then install the kit")
+    else:
+        r = K.git(target, "check-ignore", "-q", ".env")
+        if r is not None and r.returncode == 0:
+            rep.ok(".env is ignored by git")
+        else:
+            rep.bad(".env is NOT ignored by git", "Add `.env` and `.env.*` to .gitignore (the installer does this)")
+        tracked = K.tracked_secret_files(target)
+        if tracked:
+            for f, why in tracked[:10]:
+                rep.bad("%s is committed to git (%s)" % (f, why),
+                        "Rotate every key in %s at its provider FIRST, then run `git rm --cached %s` and commit" % (f, f))
+        else:
+            rep.ok("no .env or key files are tracked by git")
+        gl = K.load_guard().find_gitleaks()
+        if gl:
+            ver = subprocess.run([gl, "version"], capture_output=True, text=True).stdout.strip()
+            rep.ok("gitleaks %s is installed" % ver)
+        else:
+            rep.bad("gitleaks is not installed (the hooks use basic patterns only)",
+                    "Install gitleaks: https://github.com/gitleaks/gitleaks#installing")
+        place = K.hooks_placement(target)
+        if place["mode"] == "precommit":
+            t = K.read(os.path.join(target, ".pre-commit-config.yaml")) or ""
+            if "gitleaks" in t:
+                rep.ok("the pre-commit framework runs gitleaks")
+            else:
+                rep.bad("the pre-commit framework does not run gitleaks",
+                        "Add the entries from kit/pre-commit/pre-commit-config.yaml to .pre-commit-config.yaml")
+        else:
+            hp = K.git_out(target, "config", "--get", "core.hooksPath")
+            root = K.git_out(target, "rev-parse", "--show-toplevel") or target
+            d = K.git_out(target, "rev-parse", "--git-path", "hooks")
+            d = d if os.path.isabs(d) else os.path.join(root, d)
+            for name in ("pre-commit", "pre-push"):
+                t = K.read(os.path.join(d, name)) or ""
+                if "build-it-safe" in t and os.access(os.path.join(d, name), os.X_OK):
+                    rep.ok("git %s hook runs the kit's scan" % name)
+                else:
+                    rep.bad("git %s hook does not run the kit's scan%s" % (name, " (core.hooksPath is %s)" % hp if hp else ""),
+                            "Install the kit: " + kit_cmd)
+        # Public-prefix secrets in tracked text files (names only; values are not shown).
+        files = [f for f in K.git_out(target, "ls-files", "-z").split("\0") if f.endswith(TEXT_EXT) or ".env." in f]
+        hits = []
+        for f in files[:5000]:
+            if f.startswith((".build-it-safe/", ".agents/", ".claude/skills/", "node_modules/")) or f in ("AGENTS.md", "CLAUDE.md", "GEMINI.md"):
+                continue
+            t = K.read(os.path.join(target, f))
+            if not t or len(t) > 1_000_000:
+                continue
+            for m in PUBLIC_SECRET_RE.finditer(t):
+                hits.append((f, m.group(0)))
+        if hits:
+            for f, name in hits[:5]:
+                rep.warn("%s uses %s: a public prefix on what looks like a secret. Browsers can read it." % (f, name),
+                         "Move secret keys off public variables: call the service from a server route instead")
+        else:
+            rep.ok("no secret-looking names behind public prefixes (NEXT_PUBLIC_, VITE_ …)")
+        # Hidden characters in rules files.
+        ht = os.path.join(target, K.RUNTIME, "hidden_text.py")
+        if os.path.isfile(ht):
+            r = subprocess.run([sys.executable or "python3", ht, "--rules"], cwd=target, capture_output=True, text=True,
+                               env=dict(os.environ, BUILD_IT_SAFE_NO_ATS="1"))
+            if r.returncode == 0:
+                rep.ok("no hidden characters in agent rules files")
+            else:
+                first = (r.stderr.strip().splitlines() or ["hidden characters found"])
+                rep.bad("hidden characters in agent rules files: " + (first[1].strip() if len(first) > 1 else first[0]),
+                        "Run `python3 .build-it-safe/hidden_text.py --rules` and remove the characters it lists")
+
+    # --- CI
+    rep.section("Checks on GitHub")
+    wf = os.path.join(target, ".github", "workflows", "build-it-safe.yml")
+    if os.path.isfile(wf):
+        rep.ok("CI workflow: gitleaks, hidden characters, dependency review")
+    elif det["github"]:
+        rep.warn("no security CI workflow", "Install the kit to add .github/workflows/build-it-safe.yml")
+    else:
+        rep.info("no GitHub setup found; CI checks start once you add the workflow (install --with-ci)")
+    if os.path.isfile(os.path.join(target, ".github", "dependabot.yml")):
+        rep.ok("Dependabot is configured")
+    elif det["github"]:
+        rep.warn("no .github/dependabot.yml", "Install the kit to add Dependabot")
+    if det["github"]:
+        rep.info("on GitHub, also turn on: secret scanning and push protection, private vulnerability reporting, "
+                 "and CodeQL default setup (see kit/ci/CODEQL.md)")
+
+    if os.path.isfile(man_path):
+        d, _ = K.load_json(man_path)
+        rep.info("kit version %s installed (%s)" % ((d or {}).get("version", "?"), K.MANIFEST))
+    rep.show()
+    return 1 if rep.fail else 0
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="doctor", description="Check the Build It Safe Kit in a repository.")
+    ap.add_argument("--target", default=".")
+    ap.add_argument("--agents")
+    args = ap.parse_args(argv[1:])
+    agents = None
+    if args.agents is not None:
+        agents = [] if args.agents.strip() == "none" else [a.strip() for a in args.agents.split(",") if a.strip()]
+    target = os.path.abspath(args.target)
+    if not os.path.isdir(target):
+        ap.error("target folder not found: %s" % target)
+    return check(target, agents)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

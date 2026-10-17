@@ -1,0 +1,80 @@
+# SPDX-License-Identifier: Apache-2.0
+# Build It Safe, Forsaken Roads® (https://github.com/ForsakenRoads/build-it-safe). See NOTICE.
+# build-it-safe checks for every pull request and every push to main.
+# Every action is pinned to a full commit SHA; the tag is in the comment.
+# gitleaks runs as the official release binary, checked against its SHA-256,
+# because gitleaks-action v2+ needs a licence key for organization accounts.
+name: build-it-safe
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  secrets:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install gitleaks (checksum verified)
+        env:
+          GITLEAKS_VERSION: "8.30.1"
+          GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+        run: |
+          cd "$RUNNER_TEMP"
+          curl -sSfL -o gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf gitleaks.tar.gz gitleaks
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+      - name: Scan the commits in this change
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          baseline=""
+          if [ -f .gitleaks-baseline.json ]; then baseline="--baseline-path .gitleaks-baseline.json"; fi
+          # --no-color: gitleaks finds nothing in coloured git output, and an
+          # explicit flag beats any colour setting in git config.
+          if [ "$EVENT" = "pull_request" ]; then
+            gitleaks git --redact --no-banner --verbose $baseline --log-opts="--no-color $BASE_SHA..$HEAD_SHA" .
+          else
+            gitleaks git --redact --no-banner --verbose $baseline --log-opts="--no-color --full-history --all" .
+          fi
+
+  hidden-text:
+    name: Hidden characters in agent rules files
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install anti-trojan-source (pinned version)
+        run: npm install --prefix "$RUNNER_TEMP/ats" --ignore-scripts --no-audit --no-fund anti-trojan-source@1.13.0
+      - name: Scan AGENTS.md, CLAUDE.md, rules folders and skills
+        run: |
+          export PATH="$RUNNER_TEMP/ats/node_modules/.bin:$PATH"
+          check=.build-it-safe/hidden_text.py
+          [ -f "$check" ] || check=kit/checks/hidden_text.py   # the kit's own repository
+          python3 "$check" --rules
+
+  dependency-review:
+    name: Dependency review
+    # Free on public repositories; private ones need GitHub Code Security.
+    if: github.event_name == 'pull_request' && !github.event.repository.private
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: high

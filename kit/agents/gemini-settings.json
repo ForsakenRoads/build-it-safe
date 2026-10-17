@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "BeforeTool": [
+      {
+        "matcher": "run_shell_command|read_file|read_many_files|write_file|replace|glob|search_file_content",
+        "hooks": [
+          {
+            "type": "command",
+            "name": "build-it-safe guard",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/.build-it-safe/guard.py\"",
+            "timeout": 30000
+          }
+        ]
+      }
+    ]
+  }
+}

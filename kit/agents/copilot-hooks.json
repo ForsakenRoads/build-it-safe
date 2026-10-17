@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "hooks": {
+    "PreToolUse": [
+      {
+        "type": "command",
+        "bash": "python3 \"$(git rev-parse --show-toplevel)/.build-it-safe/guard.py\"",
+        "timeoutSec": 30
+      }
+    ]
+  }
+}

@@ -1,0 +1,83 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+# Build It Safe, Forsaken Roads® (https://github.com/ForsakenRoads/build-it-safe). See NOTICE.
+# build-it-safe pre-push hook v1
+# Stops a push when the commits being pushed contain what looks like a key.
+# Git passes "<local ref> <local sha> <remote ref> <remote sha>" lines on stdin.
+# POSIX sh; works on Linux, macOS and Git for Windows.
+
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+KIT="$ROOT/.build-it-safe"
+INPUT=$(cat)
+status=0
+
+find_gitleaks() {
+  if [ -n "${BUILD_IT_SAFE_GITLEAKS:-}" ] && [ -x "$BUILD_IT_SAFE_GITLEAKS" ]; then echo "$BUILD_IT_SAFE_GITLEAKS"; return; fi
+  if command -v gitleaks >/dev/null 2>&1; then command -v gitleaks; return; fi
+  for d in "$HOME/.local/bin" /opt/homebrew/bin /usr/local/bin "$HOME/go/bin" "$HOME/bin"; do
+    if [ -x "$d/gitleaks" ]; then echo "$d/gitleaks"; return; fi
+  done
+}
+
+is_zero() { case "$1" in *[!0]*) return 1 ;; *) return 0 ;; esac; }
+
+# gitleaks reads `git log -p` output. If colour is forced on (color.ui or
+# color.diff = always, in a config file or with `git -c ... push`), that output
+# carries colour codes and gitleaks silently finds nothing (seen with gitleaks
+# 8.30.1). --no-color on the git log command line beats every config setting,
+# including `git -c`, so it goes first in --log-opts.
+
+PY=$(command -v python3 || command -v python || true)
+GL=$(find_gitleaks)
+# Ratchet: findings recorded in .gitleaks-baseline.json are old and accepted; new ones fail.
+BASELINE=""
+[ -f "$ROOT/.gitleaks-baseline.json" ] && BASELINE="--baseline-path .gitleaks-baseline.json"  # relative: the scan runs from $ROOT
+[ -z "$GL" ] && echo "build-it-safe: gitleaks is not installed, so only the kit's basic key patterns ran." >&2
+
+while read -r lref lsha rref rsha; do
+  [ -z "$lsha" ] && continue
+  is_zero "$lsha" && continue          # deleting a remote branch: nothing to scan
+  if ! is_zero "$rsha" && git cat-file -e "$rsha^{commit}" 2>/dev/null; then
+    range="$rsha..$lsha"
+  else
+    range="$lsha --not --remotes"      # a new branch: scan what no remote has yet
+  fi
+  if [ -n "$GL" ]; then
+    (cd "$ROOT" && "$GL" git --redact --no-banner --verbose --log-level warn $BASELINE --log-opts="--no-color $range" .) || status=1
+  elif [ -n "$PY" ] && [ -f "$KIT/guard.py" ]; then
+    # shellcheck disable=SC2086
+    git log -p --no-color $range | "$PY" "$KIT/guard.py" --scan-diff || status=1
+  fi
+done <<EOF
+$INPUT
+EOF
+
+if [ "$status" -ne 0 ]; then
+  cat >&2 <<'EOF'
+
+build-it-safe: push stopped. The commits you are pushing contain what looks like a key.
+  The key is in your git history now, so deleting it in a new commit is not enough.
+  1. Revoke or rotate the key at the provider (it may already have been seen).
+  2. Rewrite the unpushed commits to take it out, for example with `git rebase -i`.
+  3. Keep the new key in .env (which git ignores), then push again.
+  If it is a false alarm, ask a maintainer to add an allowlist entry to .gitleaks.toml.
+EOF
+  exit 1
+fi
+
+SELF_DIR=$(cd "$(dirname "$0")" && pwd -P)
+HOOKS_DIR=$(cd "$(git rev-parse --git-path hooks 2>/dev/null)" 2>/dev/null && pwd -P)
+# Chain only when git runs this folder as its hooks folder (core.hooksPath set by
+# the kit). When an existing hook calls this script, that hook carries on itself.
+if [ -d "$KIT/git-hooks" ] && [ "$SELF_DIR" = "$(cd "$KIT/git-hooks" && pwd -P)" ] && [ "$HOOKS_DIR" = "$SELF_DIR" ]; then
+  PREV=$(git config --global --type=path --get core.hooksPath 2>/dev/null || git config --system --type=path --get core.hooksPath 2>/dev/null || true)
+  GITDIR=$(git rev-parse --git-common-dir 2>/dev/null)
+  if [ -n "$PREV" ] && [ -x "$PREV/pre-push" ] && [ "$(cd "$PREV" 2>/dev/null && pwd -P)" != "$SELF_DIR" ]; then
+    printf '%s\n' "$INPUT" | "$PREV/pre-push" "$@"
+    exit $?
+  elif [ -z "$PREV" ] && [ -x "$GITDIR/hooks/pre-push" ]; then
+    printf '%s\n' "$INPUT" | "$GITDIR/hooks/pre-push" "$@"
+    exit $?
+  fi
+fi
+exit 0

@@ -1,0 +1,25 @@
+/* EPUB styles: readers supply their own fonts and margins, so keep this light. */
+body { line-height: 1.45; }
+h1, h2, h3 { line-height: 1.2; }
+h1.part { border-top: 3px solid #9a3b1b; padding-top: 0.4em; }
+.dek { font-style: italic; }
+.box { border-left: 4px solid #12324f; background: #f3f6f9; padding: 0.4em 0.8em; margin: 1em 0; }
+.box > p:first-child { font-weight: bold; text-transform: uppercase; letter-spacing: 0.04em; }
+.box.plain-words { border-color: #3b6e3b; background: #f2f7f1; }
+.box.do-this { border-color: #9a3b1b; background: #fbf4ef; }
+.box.do-this ul { list-style: none; padding-left: 1.4em; }
+.box.do-this li::before { content: "\2610\00a0"; margin-left: -1.3em; }
+.box.ask-agent { border-color: #5b4a8a; background: #f5f3fa; }
+.box.watch-out { border-color: #b8860b; background: #fdf8e8; }
+pre { white-space: pre-wrap; font-size: 0.85em; background: #f4f4f1; padding: 0.5em; }
+code { font-size: 0.9em; }
+figure { margin: 1em 0; text-align: center; }
+figure img { max-width: 100%; }
+figcaption { font-size: 0.85em; text-align: left; }
+table { border-collapse: collapse; font-size: 0.85em; }
+th, td { border-bottom: 1px solid #ccc; padding: 0.25em 0.4em; text-align: left; vertical-align: top; }
+.cite { font-size: 0.7em; vertical-align: super; line-height: 0; }
+.source { font-size: 0.85em; margin: 0 0 0.4em 0; }
+.srcnum { font-weight: bold; }
+.draft-note { border: 2px dashed #9a3b1b; padding: 0.4em; }
+.attribution-note { font-size: 0.85em; }

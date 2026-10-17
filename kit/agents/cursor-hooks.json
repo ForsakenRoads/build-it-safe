@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "hooks": {
+    "beforeShellExecution": [
+      { "command": "python3 .build-it-safe/guard.py" }
+    ],
+    "beforeReadFile": [
+      { "command": "python3 .build-it-safe/guard.py" }
+    ],
+    "preToolUse": [
+      { "command": "python3 .build-it-safe/guard.py" }
+    ]
+  }
+}

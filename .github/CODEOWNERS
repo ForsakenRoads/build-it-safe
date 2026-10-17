@@ -1,0 +1,17 @@
+# Every change needs a review from a code owner (see GOVERNANCE.md).
+*                         @Astronoodle5
+
+# Agent-facing and security-sensitive paths (two approvals, one the owner's;
+# see GOVERNANCE.md). The owner reviews these personally.
+/kit/core/                @Astronoodle5
+/kit/skills/              @Astronoodle5
+/plugin/                  @Astronoodle5
+/.claude-plugin/          @Astronoodle5
+/manual/src/42-agent-rules.md @Astronoodle5
+/kit/agents/              @Astronoodle5
+/kit/guard/               @Astronoodle5
+/kit/git-hooks/           @Astronoodle5
+/kit/ci/                  @Astronoodle5
+/.github/                 @Astronoodle5
+/GOVERNANCE.md            @Astronoodle5
+/.github/CODEOWNERS       @Astronoodle5

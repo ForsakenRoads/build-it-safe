@@ -1,0 +1,4 @@
+# This repository's own gitleaks config (it wins over any machine config).
+# Tests GENERATE fake keys at run time in a temporary folder; no realistic fake key is ever committed.
+[extend]
+useDefault = true

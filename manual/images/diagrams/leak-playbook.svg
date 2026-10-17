@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 300" width="800" height="300" font-family="Noto Sans, DejaVu Sans, sans-serif">
+  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#12324f"/></marker></defs>
+  <rect width="800" height="300" fill="#fff"/>
+  <line x1="30" y1="60" x2="770" y2="60" stroke="#12324f" stroke-width="3" marker-end="url(#a)"/>
+  <g font-size="13" fill="#555" text-anchor="middle">
+    <text x="60" y="45">key public</text><text x="200" y="45">minutes</text><text x="420" y="45">an hour</text><text x="690" y="45">hours to days</text>
+  </g>
+  <circle cx="60" cy="60" r="7" fill="#9a3b1b"/>
+  <circle cx="200" cy="60" r="7" fill="#9a3b1b"/>
+  <text x="200" y="85" font-size="13" text-anchor="middle" fill="#8a3417">scanners may find it</text>
+  <g font-size="14">
+    <rect x="30" y="110" width="170" height="150" rx="10" fill="#9a3b1b"/>
+    <text x="115" y="140" font-size="17" font-weight="700" text-anchor="middle" fill="#fff">1. Revoke</text>
+    <text x="115" y="165" text-anchor="middle" fill="#fff">at the provider,</text>
+    <text x="115" y="185" text-anchor="middle" fill="#fff">first, now</text>
+    <text x="115" y="225" text-anchor="middle" fill="#fff">works everywhere,</text>
+    <text x="115" y="245" text-anchor="middle" fill="#fff">even in copies</text>
+    <rect x="215" y="110" width="170" height="150" rx="10" fill="#fbf4ef" stroke="#9a3b1b" stroke-width="2"/>
+    <text x="300" y="140" font-size="17" font-weight="700" text-anchor="middle" fill="#8a3417">2. Replace</text>
+    <text x="300" y="165" text-anchor="middle" fill="#333">smaller key, stored</text>
+    <text x="300" y="185" text-anchor="middle" fill="#333">as a secret;</text>
+    <text x="300" y="205" text-anchor="middle" fill="#333">redeploy and test</text>
+    <rect x="400" y="110" width="170" height="150" rx="10" fill="#eef3f8" stroke="#12324f" stroke-width="2"/>
+    <text x="485" y="140" font-size="17" font-weight="700" text-anchor="middle" fill="#12324f">3. Investigate</text>
+    <text x="485" y="165" text-anchor="middle" fill="#333">logs and bills for</text>
+    <text x="485" y="185" text-anchor="middle" fill="#333">the exposure window</text>
+    <rect x="585" y="110" width="185" height="150" rx="10" fill="#f2f7f1" stroke="#3b6e3b" stroke-width="2"/>
+    <text x="677" y="140" font-size="17" font-weight="700" text-anchor="middle" fill="#2f5a2f">4. Clean up</text>
+    <text x="677" y="165" text-anchor="middle" fill="#333">remove from code and</text>
+    <text x="677" y="185" text-anchor="middle" fill="#333">history; add scanning</text>
+    <text x="677" y="225" text-anchor="middle" fill="#333">slow, and cannot reach</text>
+    <text x="677" y="245" text-anchor="middle" fill="#333">existing copies</text>
+  </g>
+  <text x="400" y="290" font-size="15" text-anchor="middle" fill="#333">Order matters: a dead key is harmless wherever it was copied.</text>
+</svg>
