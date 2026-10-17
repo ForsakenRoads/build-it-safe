@@ -11,16 +11,25 @@ reads.
 
 What it stops (SECURITY.md has the exact list and the known limits):
   * reading key and secret files (.env, private keys, cloud credentials,
-    /proc/<pid>/environ), by a file tool or through the shell (cat, less, head,
-    cp, base64, source ...);
-  * environment dumps (printenv, env, set, export -p ...) and printing a
-    secret-looking variable (echo $OPENAI_API_KEY);
-  * destructive commands: rm -r on broad paths, shred, truncate outside build
-    and temp folders, force-pushing or deleting main or master, git reset
-    --hard, dropping databases, mkfs, dd onto a device;
-  * downloaded code reaching a shell or interpreter anywhere in a pipeline, or
-    through eval, source, xargs or a captured variable (curl ... | tee x | sh);
-  * skipping git hooks (--no-verify, core.hooksPath overrides, HUSKY=0);
+    /proc/<pid>/environ in any path spelling, including a backup suffix such as
+    .pem.bak), by a file tool or through the shell (cat, less, head, cp,
+    base64, source ..., and bash $'...' quotes);
+  * environment dumps (printenv, env, set, export -p, compgen -e/-v, and
+    os.environ / process.env / %ENV) and printing a secret-looking variable
+    (echo $OPENAI_API_KEY);
+  * destructive commands: rm -r on broad paths, find -delete or find -exec rm
+    on those paths, shred, truncate outside build and temp folders,
+    force-pushing or deleting main or master (including a force-push of HEAD
+    while that branch is checked out), git reset --hard, git restore or
+    checkout of the whole tree, git clean of the whole tree, dropping
+    databases (including through docker/npm/poetry runners), mkfs, dd onto a
+    disk;
+  * downloaded code reaching a shell or interpreter anywhere in a pipeline
+    (including a newline after the pipe, or the pipeline inside sh -c), or
+    through eval, source, xargs, tee >(interpreter), a captured variable, or
+    a file downloaded and executed in the same command;
+  * skipping git hooks (--no-verify, core.hooksPath overrides including
+    git config --file and GIT_CONFIG_KEY_*, HUSKY=0);
   * writing a literal key into a file (gitleaks stdin, or built-in patterns);
   * agents editing the kit's own files, or removing the guard from hook configs;
   * edits that delete names listed as protected in .build-it-safe/config.json.
@@ -58,7 +67,8 @@ SSH_KEY_NAMES = {"id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "id_ecdsa_sk",
                  "id_ed25519_sk", "identity"}
 CREDENTIAL_NAMES = {".git-credentials", ".netrc", "_netrc", ".pypirc",
                     ".htpasswd", "serviceaccountkey.json", "credentials.json",
-                    ".dev.vars", ".envrc", "auth.json", ".credentials.json"}
+                    ".dev.vars", ".envrc", "auth.json", ".credentials.json",
+                    ".npmrc", ".yarnrc", ".yarnrc.yml", ".pgpass", ".my.cnf"}
 SECRET_GLOBS = ("client_secret*.json", "service-account*.json",
                 "secrets.json", "secrets.yml", "secrets.yaml", "secrets.toml",
                 ".secrets", "*.secrets")
@@ -92,31 +102,66 @@ def _home():
     return os.path.expanduser("~")
 
 
-def secret_reason(path, cfg=None, cwd=None):
-    """Return a short reason if `path` names a secret file, else None."""
-    if not path or not isinstance(path, str):
-        return None
-    p = path.strip().strip("'\"")
-    if not p or "\n" in p or len(p) > 4096:
-        return None
-    p = p.replace("\\", "/")
-    p = os.path.expandvars(os.path.expanduser(p)) if ("~" in p or "$" in p) else p
-    base = p.rstrip("/").rsplit("/", 1)[-1]
+def lexical_norm(path):
+    """Collapse `.`, `..` and repeated slashes without touching the filesystem.
+
+    `/proc/./self/environ`, `//proc/self/environ` and `/proc/self/../1/environ`
+    are the same files as the spellings the block list names. `os.path.normpath`
+    keeps a leading `//` on POSIX, so this does not use it.
+    """
+    if not path:
+        return path
+    p = path.replace("\\", "/")
+    absolute = p.startswith("/")
+    parts = []
+    for part in p.split("/"):
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if parts and parts[-1] != "..":
+                parts.pop()
+            elif not absolute:
+                parts.append("..")
+            continue
+        parts.append(part)
+    out = "/".join(parts)
+    if absolute:
+        out = "/" + out
+    return out or ("/" if absolute else ".")
+
+
+# A copy of a secret (`server.pem.bak`, `id_rsa~`) is still that secret.
+_BACKUP_SUFFIXES = (".bak", ".backup", ".old", ".orig", ".save", ".copy", ".tmp", ".swp",
+                    ".dpkg-old", ".dpkg-dist", ".rpmnew", ".rpmsave")
+
+
+def _strip_one_backup(name):
+    low = name.lower()
+    for suf in _BACKUP_SUFFIXES:
+        if low.endswith(suf) and len(name) > len(suf):
+            return name[:-len(suf)]
+    if name.endswith("~") and len(name) > 1:
+        return name[:-1]
+    return name
+
+
+def _basename_forms(base):
+    forms, seen, cur = [], set(), base
+    for _ in range(4):
+        if not cur or cur in seen:
+            break
+        seen.add(cur)
+        forms.append(cur)
+        nxt = _strip_one_backup(cur)
+        if nxt == cur:
+            break
+        cur = nxt
+    return forms
+
+
+def _basename_secret(base):
+    """Reason from one basename. The caller applies the allow-list first."""
     low = base.lower()
-    cfg = cfg or {}
-    absp = p if p.startswith("/") else os.path.normpath(os.path.join(cwd or os.getcwd(), p))
-
-    for pat in cfg.get("allow_paths", []):
-        if fnmatch.fnmatch(p, pat) or fnmatch.fnmatch(base, pat) or fnmatch.fnmatch(absp, pat):
-            return None
-    for pat in cfg.get("secret_paths", []):
-        if fnmatch.fnmatch(p, pat) or fnmatch.fnmatch(base, pat) or fnmatch.fnmatch(absp, pat):
-            return "listed as secret in .build-it-safe/config.json"
-
-    if re.match(r"^/proc/[^/]+/(?:task/[^/]+/)?environ$", p) or re.match(r"^/proc/[^/]+/(?:task/[^/]+/)?environ$", absp):
-        return "a process environment, which holds secrets"
-    if low in ALLOWED_BASENAMES or low.endswith(ALLOWED_SUFFIXES):
-        return None
     if low == ".env" or low.startswith(".env.") or (low.endswith(".env") and len(low) > 4):
         return "an environment file, which holds secrets"
     if low in SSH_KEY_NAMES:
@@ -128,6 +173,46 @@ def secret_reason(path, cfg=None, cwd=None):
     for g in SECRET_GLOBS:
         if fnmatch.fnmatch(low, g):
             return "a secrets file"
+    return None
+
+
+_PROC_ENVIRON_RE = re.compile(r"^/proc/[^/]+/(?:task/[^/]+/)?environ$")
+
+
+def secret_reason(path, cfg=None, cwd=None):
+    """Return a short reason if `path` names a secret file, else None."""
+    if not path or not isinstance(path, str):
+        return None
+    p = path.strip().strip("'\"")
+    if not p or "\n" in p or len(p) > 4096:
+        return None
+    p = p.replace("\\", "/")
+    if "~" in p or "$" in p:
+        p = os.path.expandvars(os.path.expanduser(p))
+    shown = p
+    p = lexical_norm(p)
+    base = p.rstrip("/").rsplit("/", 1)[-1]
+    cfg = cfg or {}
+    joined = p if p.startswith("/") else os.path.join(cwd or os.getcwd(), p)
+    absp = lexical_norm(joined)
+
+    for pat in cfg.get("allow_paths", []):
+        if any(fnmatch.fnmatch(c, pat) for c in (shown, p, base, absp)):
+            return None
+    for pat in cfg.get("secret_paths", []):
+        if any(fnmatch.fnmatch(c, pat) for c in (shown, p, base, absp)):
+            return "listed as secret in .build-it-safe/config.json"
+
+    if _PROC_ENVIRON_RE.match(p) or _PROC_ENVIRON_RE.match(absp):
+        return "a process environment, which holds secrets"
+    # `.pem.example` is a sample. `.pem.bak` is not: the allow-list is the
+    # original name, and only then do we look through backup suffixes.
+    if base.lower() in ALLOWED_BASENAMES or base.lower().endswith(ALLOWED_SUFFIXES):
+        return None
+    for form in _basename_forms(base):
+        reason = _basename_secret(form)
+        if reason:
+            return reason
 
     home = _home()
     if absp.startswith(home + "/"):
@@ -174,9 +259,18 @@ REDIRS = ("<<<", "<<-", "<<", "<>", "<&", "<", ">>", ">|", ">&", ">", "&>>", "&>
 def extract_substitutions(cmd):
     """Pull out $(...), `...`, <(...) and >(...) bodies.
 
-    Returns the outer command with each body replaced by a placeholder word,
-    and the list of bodies (each analysed later as its own command)."""
-    out, bodies, i, n = [], [], 0, len(cmd)
+    Returns (outer, bodies, table). `outer` has each body replaced by a
+    numbered placeholder that still contains `__BUILD_IT_SAFE_SUBST__`.
+    `bodies` is every body, with substitutions inside them already pulled
+    out. `table` maps a placeholder to that body, so a command can see only
+    the substitutions that run before it."""
+    table = {}
+    outer, bodies = _extract_subst(cmd, [0], table)
+    return outer, bodies, table
+
+
+def _extract_subst(cmd, counter, table):
+    out, raw_bodies, tokens, i, n = [], [], [], 0, len(cmd)
     in_s = in_d = False
     while i < n:
         c = cmd[i]
@@ -202,26 +296,35 @@ def extract_substitutions(cmd):
                 elif ch == ")":
                     depth -= 1
                 j += 1
-            bodies.append(cmd[i + 2:j - 1])
+            idx = counter[0]
+            counter[0] += 1
+            token = "__BUILD_IT_SAFE_SUBST__%d__" % idx
+            raw_bodies.append(cmd[i + 2:j - 1])
+            tokens.append(token)
             # $(...) stays glued to its word (s=$(curl ...) is one assignment);
             # <(...) and >(...) become a word of their own.
             prev = "".join(out[-1:])
             glue = cmd[i] == "$" or in_d or not prev or prev[-1:].isspace()
-            out.append("__BUILD_IT_SAFE_SUBST__" if glue else " __BUILD_IT_SAFE_SUBST__")
+            out.append(token if glue else " " + token)
             i = j; continue
         if c == "`" and not in_s:
             j = cmd.find("`", i + 1)
             if j == -1:
                 j = n
-            bodies.append(cmd[i + 1:j])
-            out.append("__BUILD_IT_SAFE_SUBST__")
+            idx = counter[0]
+            counter[0] += 1
+            token = "__BUILD_IT_SAFE_SUBST__%d__" % idx
+            raw_bodies.append(cmd[i + 1:j])
+            tokens.append(token)
+            out.append(token)
             i = j + 1; continue
         out.append(c); i += 1
     outer = "".join(out)
     nested = []
-    for b in bodies:
-        o, inner = extract_substitutions(b)
-        nested.append(o)
+    for token, raw in zip(tokens, raw_bodies):
+        rewritten, inner = _extract_subst(raw, counter, table)
+        table[token] = rewritten
+        nested.append(rewritten)
         nested.extend(inner)
     return outer, nested
 
@@ -252,10 +355,50 @@ def extract_heredocs(cmd):
         cmd = cmd[:m.start()] + " __BUILD_IT_SAFE_HEREDOC__" + cmd[m.end():nl] + "\n" + rest
 
 
+def decode_ansic(text):
+    """Decode the body of a bash `$'...'` quote. Unknown escapes stay literal."""
+    out, i, n = [], 0, len(text)
+    simple = {"\\": "\\", "'": "'", '"': '"', "a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b",
+              "f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v", "?": "?"}
+    while i < n:
+        if text[i] != "\\" or i + 1 >= n:
+            out.append(text[i]); i += 1; continue
+        c = text[i + 1]
+        if c in simple:
+            out.append(simple[c]); i += 2; continue
+        if c == "c" and i + 2 < n:
+            out.append(chr(ord(text[i + 2].upper()) & 0x1F)); i += 3; continue
+        if c == "x":
+            j = i + 2
+            hexd = ""
+            while j < n and len(hexd) < 2 and text[j] in "0123456789abcdefABCDEF":
+                hexd += text[j]; j += 1
+            if hexd:
+                out.append(chr(int(hexd, 16))); i = j; continue
+        if c in ("u", "U"):
+            width = 4 if c == "u" else 8
+            hexd = text[i + 2:i + 2 + width]
+            if len(hexd) == width and all(ch in "0123456789abcdefABCDEF" for ch in hexd):
+                try:
+                    out.append(chr(int(hexd, 16)))
+                except ValueError:
+                    out.append(text[i:i + 2 + width])
+                i += 2 + width
+                continue
+        if c in "01234567":
+            j, octd = i + 1, ""
+            while j < n and len(octd) < 3 and text[j] in "01234567":
+                octd += text[j]; j += 1
+            out.append(chr(int(octd, 8))); i = j; continue
+        out.append(c); i += 2
+    return "".join(out)
+
+
 def tokenize(cmd):
     """Split into ('w', word) and ('op', op) tokens. Quotes are removed."""
     toks, i, n = [], 0, len(cmd)
     word, have = [], False
+    last_escaped = False
 
     def flush():
         nonlocal word, have
@@ -266,22 +409,35 @@ def tokenize(cmd):
     while i < n:
         c = cmd[i]
         if c in " \t\r":
-            flush(); i += 1; continue
+            flush(); last_escaped = False; i += 1; continue
         if c == "\\" and i + 1 < n:
             if cmd[i + 1] == "\n":
                 i += 2; continue
-            word.append(cmd[i + 1]); have = True; i += 2; continue
+            word.append(cmd[i + 1]); have = True; last_escaped = True; i += 2; continue
+        # Bash $'...' is an ANSI-C quote. An escaped \$ does not introduce one.
+        if c == "'" and have and word and word[-1] == "$" and not last_escaped:
+            word.pop()
+            j, buf = i + 1, []
+            while j < n and cmd[j] != "'":
+                if cmd[j] == "\\" and j + 1 < n:
+                    buf.append(cmd[j:j + 2]); j += 2; continue
+                buf.append(cmd[j]); j += 1
+            word.append(decode_ansic("".join(buf)))
+            have = True
+            last_escaped = False
+            i = j + 1 if j < n else j
+            continue
         if c == "'":
             j = cmd.find("'", i + 1)
             j = n if j == -1 else j
-            word.append(cmd[i + 1:j]); have = True; i = j + 1; continue
+            word.append(cmd[i + 1:j]); have = True; last_escaped = False; i = j + 1; continue
         if c == '"':
             j, buf = i + 1, []
             while j < n and cmd[j] != '"':
                 if cmd[j] == "\\" and j + 1 < n and cmd[j + 1] in '"\\$`':
                     buf.append(cmd[j + 1]); j += 2; continue
                 buf.append(cmd[j]); j += 1
-            word.append("".join(buf)); have = True; i = j + 1; continue
+            word.append("".join(buf)); have = True; last_escaped = False; i = j + 1; continue
         if c == "#" and not have:
             j = cmd.find("\n", i)
             i = n if j == -1 else j
@@ -306,8 +462,9 @@ def tokenize(cmd):
             kind, text, core = matched
             toks.append((kind, core))
             i += len(text)
+            last_escaped = False
             continue
-        word.append(c); have = True; i += 1
+        word.append(c); have = True; last_escaped = False; i += 1
     flush()
     return toks
 
@@ -321,6 +478,11 @@ def split_commands(cmd):
     while i < len(toks):
         kind, val = toks[i]
         if kind == "op":
+            # A newline after `|`, `&&` or `||` is a line continuation, not a
+            # new command. `curl url |\n python3` is one pipeline.
+            if val == "\n" and not cur["words"] and not cur["redirs"]:
+                i += 1
+                continue
             if cur["words"] or cur["redirs"]:
                 cmds.append(cur)
             prev_pipe = val in ("|", "|&")
@@ -373,6 +535,12 @@ def program_and_args(words):
             i += 1
             takes = WRAPPER_VALUE_OPTS.get(base, set())
             while i < len(ws) and (ws[i].startswith("-") or (base == "env" and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", ws[i]))):
+                # `env VAR=value cmd` is an assignment, same as `VAR=value cmd`.
+                if base == "env" and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", ws[i]) and not ws[i].startswith("-"):
+                    k, _, v = ws[i].partition("=")
+                    assigns[k] = v
+                    i += 1
+                    continue
                 if ws[i] in takes:
                     i += 1
                 i += 1
@@ -444,6 +612,71 @@ def current_branch(cwd, gopts):
         return ""
 
 
+_GIT_CONFIG_VALUE_OPTS = {"-f", "--file", "--blob", "--default", "--comment", "--type", "-t",
+                           "--get-color", "--get-colorbool"}
+# Whole-tree pathspecs. A single file (`git restore src/app.py`) is ordinary.
+_BROAD_GIT_PATHS = {".", "./", "..", "../", ":/", ":/*", "*", "./*", "./.", ":"}
+
+
+def _git_config_positionals(sargs):
+    """`git config` arguments with options such as `--file <path>` removed."""
+    pos, i = [], 0
+    while i < len(sargs):
+        a = sargs[i]
+        if a == "--":
+            pos.extend(sargs[i + 1:])
+            break
+        if a.startswith("-"):
+            opt = a.split("=", 1)[0]
+            if opt in _GIT_CONFIG_VALUE_OPTS and "=" not in a:
+                i += 2
+                continue
+            i += 1
+            continue
+        pos.append(a)
+        i += 1
+    return pos
+
+
+def _hooks_path_in_git_env(assigns):
+    """Git 2.31+ injects config with GIT_CONFIG_KEY_<n> / GIT_CONFIG_VALUE_<n>."""
+    for k, v in assigns.items():
+        ku = k.upper()
+        if re.fullmatch(r"GIT_CONFIG_KEY_\d+", ku) and re.sub(r"\s+", "", v or "").lower() == "core.hookspath":
+            return True
+        if ku == "GIT_CONFIG_PARAMETERS" and "core.hookspath" in (v or "").lower():
+            return True
+    return False
+
+
+def _broad_git_path(path):
+    p = (path or "").strip()
+    return p in _BROAD_GIT_PATHS or p.rstrip("/") in {".", "..", ":"}
+
+
+def _git_pathspecs(sargs):
+    """Pathspecs of checkout/restore/clean. Options that take a value are skipped."""
+    if "--" in sargs:
+        return [a for a in sargs[sargs.index("--") + 1:] if a != ""]
+    skip_value = {"-b", "-B", "-m", "--orphan", "--conflict", "-t", "--track",
+                  "--recurse-submodules", "--source", "-s"}
+    paths, i = [], 0
+    while i < len(sargs):
+        a = sargs[i]
+        if a == "--":
+            return [x for x in sargs[i + 1:] if x != ""]
+        if a.startswith("-"):
+            opt = a.split("=", 1)[0]
+            if opt in skip_value and "=" not in a:
+                i += 2
+                continue
+            i += 1
+            continue
+        paths.append(a)
+        i += 1
+    return paths
+
+
 def check_git(args, assigns, cwd, cfg):
     gopts, sub, sargs = git_parts(args)
     for k, a in enumerate(gopts):
@@ -453,11 +686,14 @@ def check_git(args, assigns, cwd, cfg):
     if assigns.get("HUSKY") == "0" or "gitleaks" in assigns.get("SKIP", "") or "build-it-safe" in assigns.get("SKIP", ""):
         raise Block("hook-bypass", "setting HUSKY=0 or SKIP=gitleaks switches off the commit checks.",
                     "Run the command without it and fix what the check reports.")
+    if _hooks_path_in_git_env(assigns):
+        raise Block("hook-bypass", "setting core.hooksPath through GIT_CONFIG_KEY_* switches off the repository's safety hooks.",
+                    "Run the git command without that variable and fix what the hook reports.")
     if "--no-verify" in sargs:
         raise Block("hook-bypass", "`--no-verify` skips the secret scan that runs before every commit and push.",
                     "Run it without --no-verify. If the scan reports a key, remove the key; if it is a false alarm, ask the human to allowlist it in .gitleaks.toml.")
     if sub == "config":
-        keys = [a.lower() for a in sargs if not a.startswith("-")]
+        keys = [a.lower() for a in _git_config_positionals(sargs)]
         reading = any(a in ("--get", "--get-all", "--list", "-l", "--get-regexp") for a in sargs)
         if keys and keys[0] == "core.hookspath" and not reading:
             raise Block("hook-bypass", "changing core.hooksPath can switch off the repository's safety hooks.",
@@ -498,6 +734,38 @@ def check_git(args, assigns, cwd, cfg):
     if sub == "reset" and "--hard" in sargs:
         raise Block("destructive", "`git reset --hard` throws away uncommitted work and cannot be undone.",
                     "Use `git stash push -m <note>` to set work aside, or ask the human first.")
+    if sub in ("restore", "checkout"):
+        broad = [p for p in _git_pathspecs(sargs) if _broad_git_path(p)]
+        if broad:
+            raise Block("destructive", "`git %s` of `%s` throws away uncommitted work and cannot be undone." % (sub, broad[0]),
+                        "Use `git stash push -m <note>` to set work aside, or name the one file you mean.")
+    if sub == "clean":
+        dry = force = ignored = False
+        paths, i = [], 0
+        while i < len(sargs):
+            a = sargs[i]
+            if a == "--":
+                paths.extend(sargs[i + 1:])
+                break
+            if a in ("-n", "--dry-run"):
+                dry = True
+            elif a in ("-f", "--force"):
+                force = True
+            elif a in ("-x", "-X", "--ignored"):
+                ignored = True
+            elif a.startswith("-") and not a.startswith("--"):
+                chars = a[1:]
+                dry = dry or "n" in chars
+                force = force or "f" in chars
+                ignored = ignored or ("x" in chars or "X" in chars)
+            elif not a.startswith("-"):
+                paths.append(a)
+            i += 1
+        # `-n` is a preview. A forced clean of the whole tree, or any clean
+        # that also removes ignored files, deletes work the agent did not name.
+        if not dry and force and (ignored or not paths or any(_broad_git_path(p) for p in paths)):
+            raise Block("destructive", "`git clean` would delete untracked work%s." % (" and ignored files" if ignored else ""),
+                        "Use `git clean -n` to preview, and name a specific folder if you mean one.")
     if sub == "push":
         protected = set(cfg.get("protected_branches", PROTECTED_BRANCHES_DEFAULT))
         force = False
@@ -521,6 +789,7 @@ def check_git(args, assigns, cwd, cfg):
         if "--delete" in positional and len(positional) > 1:
             refspecs = [p for p in positional[2:]] if positional[0] == "--delete" else refspecs
         targets = []
+        unresolved_head = False
         for r in refspecs:
             if r.startswith("+"):
                 force = True
@@ -528,16 +797,45 @@ def check_git(args, assigns, cwd, cfg):
             if r.startswith(":"):
                 force = True
             dst = r.split(":", 1)[1] if ":" in r else r
-            targets.append(dst.replace("refs/heads/", ""))
+            dst = dst.replace("refs/heads/", "")
+            # `git push origin HEAD` updates the branch that is checked out.
+            # The destination text is the word HEAD, which is not itself a
+            # protected branch name.
+            if dst in ("HEAD", "@"):
+                branch = current_branch(cwd, gopts)
+                if branch:
+                    dst = branch
+                else:
+                    unresolved_head = True
+            targets.append(dst)
         if not refspecs:
             if "--all" in sargs or "--mirror" in sargs:
                 targets = list(protected)
             else:
                 targets = [current_branch(cwd, gopts)]
         hit = [t for t in targets if t in protected]
+        if force and unresolved_head:
+            raise Block("destructive", "force-pushing `HEAD` rewrites the checked-out branch, and that branch could not be read.",
+                        "Push to a new branch and open a pull request, or ask the human.")
         if force and hit:
             raise Block("destructive", "force-pushing or deleting `%s` rewrites the shared history of a protected branch." % hit[0],
                         "Push to a new branch and open a pull request, or ask the human.")
+
+
+# Direct children of ~ that are a person's files or a credential store.
+# `~/.cache` and one old checkout (`~/old-demo`) are ordinary cleanups.
+# `~/Documents` and `~/.ssh` are not.
+_HOME_BROAD_CHILDREN = {
+    "documents", "desktop", "downloads", "pictures", "photos", "movies", "videos",
+    "music", "library", "applications", "public", "templates", "onedrive", "dropbox",
+    ".ssh", ".aws", ".gnupg", ".azure", ".kube", ".docker", ".claude", ".codex",
+    ".config", ".password-store", ".local", ".cargo", ".mozilla", ".pki", ".cert",
+    ".certs", ".npm", ".yarn", ".thunderbird", ".kde", ".gnome2", ".gnupg",
+}
+
+
+def _home_child_broad(name):
+    return (name or "").lower() in _HOME_BROAD_CHILDREN
 
 
 def broad_rm_target(t, cwd, project):
@@ -552,7 +850,7 @@ def broad_rm_target(t, cwd, project):
     absp = os.path.normpath(stripped if os.path.isabs(stripped) else os.path.join(cwd, stripped or "."))
     if absp == "/" or absp.count("/") <= 1:
         return raw
-    if absp == home or os.path.dirname(absp) == home:
+    if absp == home or (os.path.dirname(absp) == home and _home_child_broad(os.path.basename(absp))):
         return raw
     if project and (absp == project or project.startswith(absp + "/")):
         return raw
@@ -597,7 +895,11 @@ EXEC_INTERPRETERS = {"python", "python2", "python3", "perl", "ruby", "node", "no
                      "pwsh", "powershell", "osascript", "rscript", "tclsh", "bun", "deno"}
 PLACEHOLDER = "__BUILD_IT_SAFE_SUBST__"
 VAR_REF_RE = re.compile(r"\$(?:\{(?!#)([A-Za-z_][A-Za-z0-9_]*)[^}]*\}|([A-Za-z_][A-Za-z0-9_]*)|env:([A-Za-z_][A-Za-z0-9_]*))", re.I)
-TEE_TO_SHELL_RE = re.compile(r">\(\s*(?:sudo\s+(?:-\S+\s+)*)?(?:(?:ba|z|da|k)?sh|python[0-9.]*|perl|ruby|node)\b", re.I)
+# Every shell and interpreter, longest name first so `python3` wins over `python`.
+_PSUB_NAMES = sorted(SHELLS | EXEC_INTERPRETERS, key=len, reverse=True)
+TEE_TO_SHELL_RE = re.compile(
+    r">\(\s*(?:sudo\s+(?:-\S+\s+)*)?(?:" + "|".join(re.escape(n) for n in _PSUB_NAMES) + r")(?:[0-9.]*)\b",
+    re.I)
 
 
 def head_prog(words):
@@ -781,6 +1083,167 @@ def token_secret(tok, cwd, cfg):
     return secret_reason(tok, cfg, cwd) or glob_reaches_secret(tok, cwd, cfg)
 
 
+_SAFE_DEVICES = {"null", "zero", "stdin", "stdout", "stderr", "tty", "full",
+                 "random", "urandom", "console", "ptmx", "fd"}
+_FIND_NAME_OPTS = {"-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename", "-regex", "-iregex"}
+_FIND_MATCH_ALL = {"*", ".*", "./*", "/*", "**", "**/*", "./**"}
+_CODE_STRING_RE = re.compile(r"""(['"])((?:\\.|(?!\1).)*)\1""", re.S)
+_SEARCH_VALUE_OPTS = {
+    "-e", "--regexp", "-f", "--file", "-m", "--max-count", "-A", "--after-context",
+    "-B", "--before-context", "-C", "--context", "--include", "--exclude",
+    "--exclude-dir", "--include-dir", "-g", "--glob", "--iglob", "-t", "--type",
+    "-T", "--type-not", "--color", "--label", "--binary-files", "-d", "--directories",
+}
+
+
+def is_disk_device(path):
+    """True for `/dev/sda` and the like. Not for `/dev/null`, `/dev/zero`, stdout or stderr."""
+    if not path or not isinstance(path, str) or path.startswith("-"):
+        return False
+    p = lexical_norm(os.path.expanduser(path))
+    if not p.startswith("/dev/"):
+        return False
+    rest = p[len("/dev/"):]
+    if not rest:
+        return False
+    first = rest.split("/", 1)[0]
+    if first in _SAFE_DEVICES or rest in _SAFE_DEVICES:
+        return False
+    if first.startswith("tty") and (len(first) == 3 or first[3:].isdigit()):
+        return False
+    return True
+
+
+def _abs_here(path, cwd):
+    home = _home()
+    raw = os.path.expanduser((path or "").replace("${HOME}", home).replace("$HOME", home))
+    if not os.path.isabs(raw):
+        raw = os.path.join(cwd, raw or ".")
+    return os.path.normpath(raw)
+
+
+def _catastrophic_root(root, cwd):
+    """`/`, the home directory, or a shallow absolute path such as `/usr`."""
+    absp = _abs_here(root, cwd)
+    return absp in ("/", _home()) or absp.count("/") <= 1
+
+
+def _find_roots(args):
+    roots = []
+    for a in args:
+        if a.startswith("-") or a in ("(", ")", "!", ",", ";"):
+            break
+        roots.append(a)
+    return roots or ["."]
+
+
+def _find_narrowed(args):
+    """True when -name/-path/-regex limits the walk to something other than everything."""
+    for i, a in enumerate(args[:-1]):
+        if a in _FIND_NAME_OPTS and args[i + 1] not in _FIND_MATCH_ALL and set(args[i + 1]) != {"*"}:
+            return True
+    return False
+
+
+def _find_exec_deletes(args):
+    i = 0
+    while i < len(args):
+        if args[i] in ("-exec", "-execdir", "-ok", "-okdir"):
+            j, cmd = i + 1, []
+            while j < len(args) and args[j] not in (";", "+"):
+                cmd.append(args[j])
+                j += 1
+            prog = cmd[0].rsplit("/", 1)[-1] if cmd else ""
+            if prog in ("rm", "unlink", "rmdir", "shred", "wipe"):
+                return True
+            if prog in SHELLS and re.search(r"\brm\b", " ".join(cmd)):
+                return True
+            i = j + 1
+            continue
+        i += 1
+    return False
+
+
+def _search_pattern_indexes(args):
+    """Indexes of grep/rg arguments that are the search text, not files to read."""
+    idxs, positionals, seen_flag, i = set(), [], False, 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            rest = list(range(i + 1, len(args)))
+            if not seen_flag and rest:
+                idxs.add(rest[0])
+            return idxs
+        if a.startswith("-") and a != "-":
+            opt = a.split("=", 1)[0]
+            if opt in ("-e", "--regexp") or (not a.startswith("--") and "e" in a[1:] and a[1:].endswith("e")):
+                seen_flag = True
+                if "=" not in a and i + 1 < len(args):
+                    idxs.add(i + 1)
+                    i += 2
+                    continue
+            elif opt in _SEARCH_VALUE_OPTS and "=" not in a:
+                i += 2
+                continue
+            i += 1
+            continue
+        positionals.append(i)
+        i += 1
+    if not seen_flag and positionals:
+        idxs.add(positionals[0])
+    return idxs
+
+
+def _code_literals(blob):
+    found = []
+    for m in _CODE_STRING_RE.finditer(blob or ""):
+        body = re.sub(r"\\([\\'\"])", r"\1", m.group(2))
+        found.append(body)
+    return found
+
+
+def _py_env_problem(blob):
+    if re.search(r"\bos\s*\.\s*environ\b(?!\s*(?:\.get\s*\(|\[\s*['\"]))", blob):
+        return "the whole environment"
+    for m in re.finditer(r"""\bos\s*\.\s*(?:environ\s*(?:\.get\s*\(|\[)|getenv\s*\()\s*(['"])([A-Za-z_][A-Za-z0-9_]*)\1""", blob):
+        if secret_var(m.group(2)):
+            return "$" + m.group(2)
+    return None
+
+
+def _node_env_problem(blob):
+    if re.search(r"""process\s*(?:\.\s*env\b|\[\s*['\"]env['\"]\s*\])(?!\s*(?:\[\s*['\"]|\.\s*[A-Za-z_]))""", blob):
+        return "the whole environment"
+    for m in re.finditer(
+            r"""process\s*(?:\.\s*env|\[\s*['\"]env['\"]\s*\])\s*(?:\[\s*['\"]([A-Za-z_][A-Za-z0-9_]*)['\"]|\.([A-Za-z_][A-Za-z0-9_]*))""",
+            blob):
+        key = m.group(1) or m.group(2)
+        if secret_var(key):
+            return "$" + key
+    return None
+
+
+def _perl_env_problem(blob):
+    if re.search(r"(?:keys|values|each)\s*\(?\s*%\s*ENV\b", blob) or re.search(r"(?<![\w$])%\s*ENV\b", blob):
+        return "the whole environment"
+    for m in re.finditer(r"""\$ENV\s*\{\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?\s*\}""", blob):
+        if secret_var(m.group(1)):
+            return "$" + m.group(1)
+    return None
+
+
+def code_env_problem(prog, blob):
+    """A reason if this interpreter snippet prints environment values."""
+    p = (prog or "").lower()
+    if p in ("python", "python2", "python3", "uv"):
+        return _py_env_problem(blob)
+    if p in ("node", "nodejs", "bun", "deno", "tsx", "ts-node"):
+        return _node_env_problem(blob)
+    if p == "perl":
+        return _perl_env_problem(blob)
+    return None
+
+
 def check_simple(cmd, cwd, project, cfg, context):
     words, redirs = cmd["words"], cmd["redirs"]
     prog, args, assigns, raw_prog = program_and_args(words)
@@ -791,7 +1254,10 @@ def check_simple(cmd, cwd, project, cfg, context):
             if r:
                 raise Block("secret-read", "`%s` is %s, and redirecting it into a command reads it." % (target, r),
                             "Read `.env.example` for variable names, and ask the human about values.")
-        if op.startswith(">") or op in ("&>", "&>>"):
+        if op.startswith(">") or op in ("&>", "&>>", ">&"):
+            if target and is_disk_device(target):
+                raise Block("destructive", "redirecting output onto `%s` can overwrite a whole disk." % target,
+                            "Write to a file under the project or /tmp, not to a disk device.")
             if target and is_kit_path(target, cwd, project):
                 raise Block("kit-tamper", "agents may not overwrite the Build It Safe Kit's own files (%s)." % target,
                             "Ask the human to change the kit.")
@@ -808,15 +1274,26 @@ def check_simple(cmd, cwd, project, cfg, context):
         check_truncate(args, cwd)
     if prog in ("rm", "rmdir", "unlink") or raw_prog.endswith("/rm"):
         check_rm(args, cwd, project)
-    if prog.startswith("mkfs") or (prog == "dd" and any(a.startswith("of=/dev/") for a in args)):
+    if prog.startswith("mkfs"):
         raise Block("destructive", "`%s` can overwrite a whole disk." % prog)
+    if prog == "dd":
+        devs = [a.split("=", 1)[1] for a in args if a.startswith("of=")]
+        bad = [d for d in devs if is_disk_device(d)]
+        if bad:
+            raise Block("destructive", "`dd` can overwrite a whole disk (%s)." % bad[0])
     if prog in ("dropdb", "dropuser"):
         raise Block("destructive", "`%s` deletes a database or its owner. A dropped database is gone unless a backup restores it." % prog,
                     "Ask the human. Never run this against production.")
-    if prog == "find" and any(a in ("-delete",) for a in args):
-        roots = [a for a in args if not a.startswith("-")][:1]
-        if roots and broad_rm_target(roots[0], cwd, project):
-            raise Block("destructive", "`find %s -delete` would delete across a whole folder tree." % roots[0])
+    if prog == "find" and ("-delete" in args or _find_exec_deletes(args)):
+        roots = _find_roots(args)
+        root = roots[0]
+        if broad_rm_target(root, cwd, project):
+            # `find . -name '*.pyc' -delete` is a cleanup. `find ~ -name x -delete`
+            # and `find . -delete` are not: home, `/` and shallow paths stay blocked
+            # even with a name predicate, and so does an unfiltered walk.
+            if _catastrophic_root(root, cwd) or not _find_narrowed(args):
+                how = "-delete" if "-delete" in args else "-exec"
+                raise Block("destructive", "`find %s %s` would delete across a whole folder tree." % (root, how))
 
     # Secret files named on the command line.
     hits = []
@@ -826,16 +1303,29 @@ def check_simple(cmd, cwd, project, cfg, context):
         r = token_secret(w, cwd, cfg)
         if r:
             hits.append((idx, w, r))
+    if prog in ("grep", "egrep", "fgrep", "rg", "ag", "ack"):
+        # `grep -n .env README.md` searches for the text. `grep KEY .env` reads the file.
+        skip = _search_pattern_indexes(args)
+        hits = [h for h in hits if h[0] not in skip]
     # Interpreter code (python -c, node -e, awk programs, heredocs).
+    # A string is a file only when the whole literal is a path. A sentence that
+    # mentions `.env` is not an open() of that file. `process.env` is handled
+    # as an environment dump, not as a file whose name ends in `.env`.
     code_hits = []
     if prog in INTERPRETERS or prog in DB_CLIENTS:
-        blobs = [w for w in args if " " in w or "(" in w or "'" in w or '"' in w]
+        blobs = [w for w in args if " " in w or "(" in w or "'" in w or '"' in w or ".env" in w or "environ" in w or "ENV" in w]
         blobs += context.get("heredocs", []) if prog in INTERPRETERS else []
         for blob in blobs:
-            for m in SECRET_WORD_RE.finditer(blob):
-                r = secret_reason(m.group(1), cfg, cwd)
+            if prog in INTERPRETERS:
+                why = code_env_problem(prog, blob)
+                if why:
+                    raise Block("env-dump", "this %s code prints %s, which can include keys." % (prog, why), DUMP_ADVICE)
+            for lit in _code_literals(blob):
+                if not lit or any(ch.isspace() for ch in lit):
+                    continue
+                r = secret_reason(lit, cfg, cwd)
                 if r:
-                    code_hits.append((m.group(1), r))
+                    code_hits.append((lit, r))
     if any(PLACEHOLDER in a for a in args) and context.get("subst_secret") and prog not in META_PROGS:
         name, r = context["subst_secret"][0]
         raise Block("secret-read", "`%s` is %s, and this command reads it through `$(...)`." % (name, r),
@@ -860,8 +1350,8 @@ def check_simple(cmd, cwd, project, cfg, context):
                         "Add it to .gitignore instead (`echo '%s' >> .gitignore`)." % os.path.basename(name))
     if prog in COPY_PROGS:
         positional = [w for w in args if not w.startswith("-")]
-        if positional and all(i == len(args) - 1 or args[i] == positional[-1] for i, _, _ in hits) and prog != "mv":
-            return  # the secret file is only the destination: cp .env.example .env
+        if positional and all(i == len(args) - 1 or args[i] == positional[-1] for i, _, _ in hits):
+            return  # the secret file is only the destination: cp .env.example .env, mv .env.example .env
     if prog in ENV_FILE_LOADERS:
         if all(args[i - 1] == "--env-file" or args[i].startswith("--env-file=") for i, _, _ in hits if i > 0) and \
                 all(i > 0 for i, _, _ in hits):
@@ -884,13 +1374,32 @@ DUMP_ADVICE = ("Name the variable you need (for example `printenv PATH`). If a t
                "ask the human; the app reads it from the environment itself.")
 
 
+# `PRIVATE_IP` is an address. `PUBLIC_KEY` and `CACHE_KEY` are not credentials.
+# `MAX_TOKENS` is a count: TOKEN as its own word still is a credential.
+_PRIVATE_NET = {"IP", "IPS", "ADDR", "ADDRESS", "HOST", "HOSTNAME", "PORT", "DNS",
+                "NETWORK", "SUBNET", "CIDR", "MASK", "GATEWAY", "INTERFACE"}
+
+
 def secret_var(name):
     n = (name or "").upper()
-    if any(w in n for w in ("SECRET", "TOKEN", "PASSWORD", "PASSWD", "CREDENTIAL", "PRIVATE", "DATABASE_URL")):
+    if not n:
+        return False
+    if re.search(r"(^|_)PUBLIC_KEYS?$", n) and not re.search(r"SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL", n):
+        return False
+    if re.search(r"(^|_)CACHE_KEYS?$", n) and not re.search(r"SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL", n):
+        return False
+    parts = re.findall(r"[A-Z0-9]+", n)
+    if any(w in n for w in ("SECRET", "PASSWORD", "PASSWD", "CREDENTIAL", "DATABASE_URL")):
         return True
-    if re.search(r"(^|_)PASS($|_)", n) or n.endswith("PASS"):
+    if "TOKEN" in parts:
         return True
-    return bool(re.search(r"(^|_)KEYS?($|_)", n) or n.endswith("KEY"))
+    if "PASS" in parts or n.endswith("PASS"):
+        return True
+    if "PRIVATE" in parts and any(p in _PRIVATE_NET for p in parts):
+        return False
+    if "PRIVATE" in parts:
+        return True
+    return bool(any(p in ("KEY", "KEYS") for p in parts) or n.endswith("KEY") or n.endswith("KEYS"))
 
 
 def check_env_dump(words, redirs, cwd):
@@ -927,8 +1436,14 @@ def check_env_dump(words, redirs, cwd):
             raise Block("env-dump", "`printenv %s` would print a secret." % bad[0], DUMP_ADVICE)
     if name == "set" and not args:
         raise Block("env-dump", "`set` with no arguments prints every shell variable, including any keys.", DUMP_ADVICE)
-    if name == "export" and (not args or args == ["-p"]):
-        raise Block("env-dump", "`export -p` prints every exported variable, including any keys.", DUMP_ADVICE)
+    if name == "export":
+        printing = (not args) or any(
+            a == "-p" or (a.startswith("-") and not a.startswith("--") and "p" in a[1:]) for a in args)
+        names = [a for a in args if not a.startswith(("-", "+")) and not re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", a)]
+        if printing and not names:
+            raise Block("env-dump", "`export -p` prints every exported variable, including any keys.", DUMP_ADVICE)
+        if printing and any(secret_var(n) for n in names):
+            raise Block("env-dump", "`export -p %s` would print a secret variable." % names[0], DUMP_ADVICE)
     if name in ("declare", "typeset"):
         flags = "".join(a[1:] for a in args if a.startswith("-"))
         names = [a for a in args if not a.startswith(("-", "+"))]
@@ -936,8 +1451,12 @@ def check_env_dump(words, redirs, cwd):
             raise Block("env-dump", "`%s %s` prints every variable, including any keys." % (name, " ".join(args)), DUMP_ADVICE)
         if "p" in flags and any(secret_var(n.split("=", 1)[0]) for n in names if "=" not in n):
             raise Block("env-dump", "`%s -p` would print a secret variable." % name, DUMP_ADVICE)
-    if name == "compgen" and ("-e" in args or ("-A" in args and "export" in args)):
-        raise Block("env-dump", "`compgen -e` lists every exported variable.", DUMP_ADVICE)
+    if name == "compgen":
+        shorts = "".join(a[1:] for a in args if a.startswith("-") and not a.startswith("--"))
+        actions = [args[i + 1] for i, a in enumerate(args) if a == "-A" and i + 1 < len(args)]
+        if "e" in shorts or "v" in shorts or "export" in actions or "variable" in actions:
+            raise Block("env-dump", "`compgen %s` lists shell variables, including the names of any keys." % " ".join(args),
+                        DUMP_ADVICE)
     if name in ("get-childitem", "gci", "dir", "ls", "get-item", "gi") and any(re.match(r"(?i)^env:\\?\*?$", a) for a in args):
         raise Block("env-dump", "listing `env:` prints every environment variable, including any keys.", DUMP_ADVICE)
     # Printing a secret-looking variable: echo $OPENAI_API_KEY, printf '%s' "$DB_PASSWORD"
@@ -982,16 +1501,266 @@ def check_truncate(args, cwd):
                     "Ask the human before emptying project files.")
 
 
-def check_shell(command, cwd, project, cfg):
+_PKG_RUN = {
+    "bundle": {"exec"}, "poetry": {"run"}, "pipenv": {"run"}, "uv": {"run"},
+    "npm": {"exec", "x"}, "yarn": {"exec", "dlx"}, "pnpm": {"exec", "dlx"},
+    "bun": {"x"}, "composer": {"exec"},
+}
+_DOCKER_VALUE = {"-u", "--user", "-w", "--workdir", "-e", "--env", "--env-file", "--index",
+                 "--entrypoint", "-v", "--volume", "--name", "--network", "--hostname",
+                 "-l", "--label", "--mount", "-p", "--publish"}
+_DOCKER_GLOBAL = {"-c", "--context", "--host", "-H", "--config", "--log-level"}
+_COMPOSE_VALUE = {"-f", "--file", "--project-name", "-p", "--profile", "--env-file", "--project-directory"}
+_FETCH_WORDS = ("curl", "wget", "fetch", "aria2c", "iwr", "invoke-webrequest")
+
+
+def _skip_opts(words, i, value_opts):
+    n = len(words)
+    while i < n:
+        a = words[i]
+        if a == "--":
+            return i + 1
+        if not a.startswith("-"):
+            return i
+        opt = a.split("=", 1)[0]
+        if opt in value_opts and "=" not in a:
+            i += 2
+            continue
+        i += 1
+    return i
+
+
+def _wrapper_next(words, i, base):
+    takes = WRAPPER_VALUE_OPTS.get(base, set())
+    n = len(words)
+    while i < n and (words[i].startswith("-") or (base == "env" and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[i]))):
+        if base == "env" and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[i]) and not words[i].startswith("-"):
+            i += 1
+            continue
+        if words[i] in takes:
+            i += 1
+        i += 1
+    if base == "timeout" and i < n and re.match(r"^[\d.]+[smhd]?$", words[i]):
+        i += 1
+    if base == "su" and i < n and words[i] == "-c":
+        i += 1
+    return i
+
+
+def _runner_inner(words, i, base):
+    """Index of the command after docker/npm/poetry/bundle, or None."""
+    n, low = len(words), base.lower()
+    if low in ("docker", "podman"):
+        j = _skip_opts(words, i + 1, _DOCKER_GLOBAL)
+        if j >= n:
+            return None
+        if words[j] == "compose":
+            j = _skip_opts(words, j + 1, _COMPOSE_VALUE)
+            if j < n and words[j] in ("exec", "run"):
+                j = _skip_opts(words, j + 1, _DOCKER_VALUE)
+                if j < n and not words[j].startswith("-"):
+                    j += 1
+                return j
+            return None
+        if words[j] in ("exec", "run"):
+            j = _skip_opts(words, j + 1, _DOCKER_VALUE)
+            if j < n and not words[j].startswith("-"):
+                j += 1
+            return j
+        return None
+    if low in ("docker-compose", "podman-compose"):
+        j = _skip_opts(words, i + 1, _COMPOSE_VALUE)
+        if j < n and words[j] in ("exec", "run"):
+            j = _skip_opts(words, j + 1, _DOCKER_VALUE)
+            if j < n and not words[j].startswith("-"):
+                j += 1
+            return j
+        return None
+    if low in _PKG_RUN:
+        j = _skip_opts(words, i + 1, {"--directory", "-C", "--file"})
+        if j < n and words[j] in _PKG_RUN[low]:
+            j = _skip_opts(words, j + 1, set())
+            if j < n and words[j] == "--":
+                j += 1
+            return j
+    return None
+
+
+def invoked_programs(words):
+    """Every program this line will run, including the one a runner wraps."""
+    progs, i, steps, n = [], 0, 0, len(words)
+    while i < n and steps < 8:
+        steps += 1
+        w = words[i]
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", w):
+            i += 1
+            continue
+        low = w.rsplit("/", 1)[-1].lower()
+        progs.append(low)
+        if low in WRAPPERS:
+            nxt = _wrapper_next(words, i + 1, low)
+            if nxt > i:
+                i = nxt
+                continue
+            break
+        inner = _runner_inner(words, i, low)
+        if inner is not None and inner > i:
+            i = inner
+            continue
+        break
+    return progs
+
+
+def shell_c_argument(prog, args):
+    """The script given to `sh -c` / `bash -lc`, or None if this is not that form."""
+    if (prog or "").lower() not in SHELLS:
+        return None
+    i, n = 0, len(args)
+    while i < n:
+        a = args[i]
+        if a == "--":
+            return None
+        if a == "-c" or (a.startswith("-") and not a.startswith("--") and "c" in a[1:]):
+            return args[i + 1] if i + 1 < n else None
+        if a in ("-o", "+o", "--rcfile", "--init-file"):
+            i += 2
+            continue
+        if a.startswith("-"):
+            i += 1
+            continue
+        return None
+    return None
+
+
+def _abs_lex(path, cwd):
+    if not path or path == "-" or PLACEHOLDER in path:
+        return ""
+    p = os.path.expanduser(path)
+    if not os.path.isabs(p):
+        p = os.path.join(cwd or ".", p)
+    return lexical_norm(p)
+
+
+def _fetcher_outputs(name, args, redirs, cwd):
+    out, i, n = [], 0, len(args)
+    while i < n:
+        a = args[i]
+        if name == "curl" and a in ("-o", "--output") and i + 1 < n:
+            out.append(args[i + 1]); i += 2; continue
+        if name == "curl" and a.startswith("--output="):
+            out.append(a.split("=", 1)[1]); i += 1; continue
+        if name == "curl" and a.startswith("-o") and not a.startswith("--") and len(a) > 2:
+            out.append(a[2:]); i += 1; continue
+        if name in ("wget", "wget2") and a in ("-O", "--output-document") and i + 1 < n:
+            out.append(args[i + 1]); i += 2; continue
+        if name in ("wget", "wget2") and a.startswith("--output-document="):
+            out.append(a.split("=", 1)[1]); i += 1; continue
+        i += 1
+    for op, target in redirs:
+        if op in (">", ">|", "&>") and target and not target.startswith("&") and PLACEHOLDER not in target:
+            out.append(target)
+    paths = []
+    for raw in out:
+        if raw in ("-", "/dev/stdout", "/dev/stderr"):
+            continue
+        p = _abs_lex(raw, cwd)
+        if p:
+            paths.append(p)
+    return paths
+
+
+def _tee_files(args, cwd):
+    files, i = [], 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            files.extend(x for x in args[i + 1:] if PLACEHOLDER not in x)
+            break
+        if a.startswith("-") or PLACEHOLDER in a:
+            i += 1
+            continue
+        files.append(a)
+        i += 1
+    return [p for p in (_abs_lex(x, cwd) for x in files) if p]
+
+
+def _executed_files(name, args):
+    """Script files this program would execute. Inline `-c` / `-e` code is not a file."""
+    name = (name or "").lower()
+    if name in ("source", "."):
+        return [a for a in args if a and not a.startswith("-") and PLACEHOLDER not in a]
+    if name in SHELLS:
+        i = 0
+        while i < len(args):
+            a = args[i]
+            if a == "--":
+                return [args[i + 1]] if i + 1 < len(args) and PLACEHOLDER not in args[i + 1] else []
+            if a.startswith("-") and not a.startswith("--") and "c" in a[1:]:
+                return []
+            if a.startswith("-"):
+                if a in ("-o", "+o", "--rcfile", "--init-file"):
+                    i += 2
+                    continue
+                i += 1
+                continue
+            return [a]
+        return []
+    if name in EXEC_INTERPRETERS:
+        i = 0
+        while i < len(args):
+            a = args[i]
+            if a.lower() in CODE_FLAGS or (a.startswith("-") and not a.startswith("--") and len(a) > 1 and a[1:2] in "cemrE"):
+                return []
+            if a.startswith("-"):
+                i += 1
+                continue
+            return [a]
+        return []
+    return []
+
+
+_SUBST_TOKEN_RE = re.compile(r"__BUILD_IT_SAFE_SUBST__\d+__")
+
+
+def _body_download_files(body, table, cwd, seen):
+    """Files this text writes with curl/wget or `tee` of a download.
+
+    A substitution runs before the command that contains it, so its files
+    count. A download later in the same list does not: `sh app.py && curl -o
+    app.py URL` runs the file that is already there."""
+    found = set()
+    source_seen = False
+    for c in split_commands(body or ""):
+        blob = " ".join(c["words"]) + " " + " ".join(t for _, t in c["redirs"])
+        for tok in _SUBST_TOKEN_RE.findall(blob):
+            if tok in seen:
+                continue
+            seen.add(tok)
+            found |= _body_download_files(table.get(tok, ""), table, cwd, seen)
+        if not c.get("piped_from"):
+            source_seen = False
+        name, args = head_prog(c["words"])
+        if name in FETCHERS:
+            found.update(_fetcher_outputs(name, args, c["redirs"], cwd))
+            source_seen = True
+        elif source_seen and name == "tee":
+            found.update(_tee_files(args, cwd))
+    return found
+
+
+def check_shell(command, cwd, project, cfg, depth=0):
     if not isinstance(command, str) or not command.strip():
         return
+    if depth > 6:
+        raise Block("pipe-to-shell", "this command nests shells too deeply to check safely.",
+                    "Run the inner command directly, without another `sh -c`.")
     if CURL_PIPE_RE.search(command) or SHELL_SUBST_RE.search(command) or SHELL_C_RE.search(command):
         raise Block("pipe-to-shell", "piping a download straight into a shell runs code nobody has read.",
                     "Download the script to a file, show it to the human, and run it only after they approve; or use the project's package manager.")
     noheredoc, heredocs = extract_heredocs(command)
-    outer, inner = extract_substitutions(noheredoc)
+    outer, inner, subst_table = extract_substitutions(noheredoc)
     pieces = [outer] + inner
-    if TEE_TO_SHELL_RE.search(command) and any(f in command.lower() for f in ("curl", "wget", "fetch", "aria2c", "iwr", "invoke-webrequest")):
+    if TEE_TO_SHELL_RE.search(command) and any(f in command.lower() for f in _FETCH_WORDS):
         raise Block("pipe-to-shell", "this sends a download into a shell through `>( … )`, so downloaded code would run without anyone reading it.",
                     "Download the script to a file, show it to the human, and run it only after they approve.")
     check_fetch_and_run(pieces, inner, [])
@@ -1003,18 +1772,40 @@ def check_shell(command, cwd, project, cfg):
                 r = token_secret(w, cwd, cfg)
                 if r:
                     subst_secret.append((w, r))
+    nested = []
     for piece in pieces:
         cmds = split_commands(piece)
+        downloaded = set()
+        subst_seen = set()
+        source_seen = False
         for k, c in enumerate(cmds):
-            prog = program_and_args(c["words"])[0]
-            progs_all.append(prog)
+            blob = " ".join(c["words"]) + " " + " ".join(t for _, t in c["redirs"])
+            for tok in _SUBST_TOKEN_RE.findall(blob):
+                if tok in subst_seen:
+                    continue
+                subst_seen.add(tok)
+                # The substitution runs as this command is expanded, before it.
+                downloaded |= _body_download_files(subst_table.get(tok, ""), subst_table, cwd, subst_seen)
+            if not c.get("piped_from"):
+                source_seen = False
+            prog, cargs, _, _ = program_and_args(c["words"])
+            progs_all.extend(invoked_programs(c["words"]))
+            hname, hargs = head_prog(c["words"])
+            for f in _executed_files(hname, hargs):
+                if _abs_lex(f, cwd) in downloaded:
+                    raise Block("pipe-to-shell",
+                                "this downloads `%s` and runs it in the same command, so the code would run without anyone reading it." % os.path.basename(f),
+                                "Download the script, show it to the human, and run it only after they approve.")
+            if hname in FETCHERS:
+                downloaded.update(_fetcher_outputs(hname, hargs, c["redirs"], cwd))
+                source_seen = True
+            elif source_seen and hname == "tee":
+                downloaded.update(_tee_files(hargs, cwd))
             feeds_xargs = any(any(w.rsplit("/", 1)[-1] in ("xargs", "parallel") for w in x["words"][:3])
                               for x in cmds[k + 1:] if x.get("piped_from"))
             check_simple(c, cwd, project, cfg, {"heredocs": heredocs, "feeds_xargs": feeds_xargs,
                                                 "subst_secret": subst_secret if piece is outer else []})
             # Kit files and hook configs: only reading tools may name them.
-            words = c["words"]
-            _, cargs, _, raw = program_and_args(words)
             git_sub = git_parts(cargs)[1] if prog == "git" else ""
             for w in cargs:
                 if not is_kit_path(w, cwd, project):
@@ -1027,10 +1818,17 @@ def check_shell(command, cwd, project, cfg):
                     continue
                 raise Block("kit-tamper", "agents may not change the Build It Safe Kit's files or, from the shell, the hook settings that run it (%s)." % w,
                             "Ask the human to change the kit.")
+            script = shell_c_argument(prog, cargs)
+            if script:
+                nested.append(script)
+    # A heredoc that merely mentions DROP DATABASE is not a database client.
+    # The client may be behind a runner: `docker compose exec db psql`, `npm exec prisma`.
     if DB_DROP_RE.search(command) or DB_TOOL_RE.search(command):
-        if any(p in DB_CLIENTS or p.startswith("redis") for p in progs_all) or heredocs:
+        if any((p or "").lower() in DB_CLIENTS or (p or "").lower().startswith("redis") for p in progs_all):
             raise Block("destructive", "this command drops or resets a database. A dropped database is gone unless a backup restores it.",
                         "Ask the human. Never run this against production.")
+    for script in nested:
+        check_shell(script, cwd, project, cfg, depth + 1)
 
 
 # --------------------------------------------------------------------------
